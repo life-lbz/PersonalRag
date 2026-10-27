@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+node_modules/
+dist/
+.screenshots/
+产物/
+开发文档/
+*.log
+logs/
+.tmp/
+.DS_Store

@@ -1,0 +1,147 @@
+# ============ 服务基础 ============
+server:
+  host: 0.0.0.0
+  port: 8000
+  workers: 2
+  cors_origins: ["http://localhost:5173"]
+
+# ============ 存储连接 ============
+postgres:
+  dsn: postgresql+asyncpg://postgres:${PG_PASSWORD}@localhost:5432/rag
+  sync_dsn: postgresql+psycopg2://postgres:${PG_PASSWORD}@localhost:5432/rag
+  pool_size: 20
+
+milvus:
+  uri: http://localhost:19530
+  text_collection: kb_chunks
+  image_collection: kb_images
+
+redis:
+  url: redis://:${REDIS_PASSWORD}@localhost:6379/0
+
+neo4j:
+  uri: bolt://localhost:7687
+  auth: [neo4j, ${NEO4J_PASSWORD}]
+  enabled: false                             # 三期启用
+
+minio:
+  endpoint: localhost:9000
+  access_key: ${MINIO_ACCESS_KEY}
+  secret_key: ${MINIO_SECRET_KEY}
+  bucket: rag-docs
+
+# ============ 模型服务(独立推理服务, HTTP) ============
+models:
+  embedding:
+    base_url: http://localhost:8001
+    model: bge-m3
+    dim: 1024
+    batch_size: 16
+    timeout: 120
+  rerank:
+    base_url: http://localhost:8002
+    model: bge-reranker-base                # 方案E选定(280M, CPU快一倍); 提质可换 bge-reranker-large 并把 score_threshold 调回0.35附近重验
+    batch_size: 64
+    timeout: 120
+  llm:
+    base_url: http://localhost:11434/v1     # Ollama, OpenAI 兼容接口
+    model: qwen2.5:3b-instruct-q4_K_M       # 已选定(本机4G显存全进, 20-40 tok/s)
+    temperature: 0.1
+    max_output_tokens: 1024
+    context_window: 8192                    # Ollama侧 num_ctx 降为4096时, 此值与 assemble.context_window 同步降
+    timeout: 180
+
+# ============ 离线入库 ============
+ingest:
+  upload_max_mb: 100
+  task_retry_max: 3                          # 每环节失败重试上限
+  # 幂等缓存(内容hash:步骤版本)
+  cache:
+    enabled: true
+    key_prefix: "ingest_cache:"
+    step_version: "v1"                       # 增强/embedding逻辑升级时递增, 旧缓存自动失效
+  # 切分模板(doc_type→模板映射)
+  splitter:
+    default: general
+    map:
+      pdf: general
+      docx: general
+      md: general
+      txt: general
+      xlsx: table
+      csv: table
+      pptx: presentation
+      eml: email
+      law: law
+    general:
+      child_tokens: 256
+      parent_tokens: 1024
+      overlap_ratio: 0.1
+      table_context_window: 256              # 表格/图片块附加前后上下文token数
+  # 块级增强
+  enhance:
+    auto_question:
+      enabled: true                          # P0 核心项
+      questions_per_chunk: 3
+      queue: low_priority                    # 闲时队列
+    auto_keyword:
+      enabled: false                         # P1 再开
+      topn: 5
+    augmented_context:
+      enabled: false                         # P2 可选
+  # 版本管理
+  version:
+    default_policy: replace                  # replace(覆盖式)|coexist(并存式)
+    purge_window_days: 7                     # 覆盖式旧版保留窗口
+    policy_by_doc_type:
+      law: coexist                           # 法规强制并存式
+
+# ============ 在线检索 ============
+retrieve:
+  per_channel_top_k: 100                     # 宽召回, 每路召回数
+  vector_score_threshold: null               # 向量阶段不设阈值(刻意宽召回)
+  fusion:
+    mode: weighted                           # weighted | rrf
+    vector_weight: 0.3                       # weighted模式: 综合分=w×cosine+(1-w)×全文分
+  kb_boost: {}                               # 知识库静态加权
+  rerank:
+    score_threshold: 0.2                     # rerank分硬过滤(按reranker-base标定)
+    top_n: 5
+    candidate_pool_max: 400                  # 进入rerank的候选上限
+  version_filter: searchable_only            # 仅检索 searchable=true 的块
+  cache:
+    query_embedding_ttl: 3600                # 查询向量缓存(秒)
+    query_result_ttl: 600                    # 高频结果缓存(秒)
+
+# 上下文组装
+assemble:
+  context_window: 8192                       # 与 llm.context_window 一致
+  max_output: 1024
+  prompt_overhead: 800                       # 模板+指令预留token
+  merge_sibling_chunks: true                 # 同父子块命中≥2合并返回父块
+  truncation: keep_head_tail                 # 末篇超预算: 保头尾截中间
+
+# 路由(LangGraph四通道)
+router:
+  mode: auto                                 # auto | 强制指定: direct/rule/hybrid/multi_hop
+  confidence_threshold: 0.6                  # 低于此置信度降级到hybrid
+  max_retry: 2                               # 反思重试上限
+  planner_max_steps: 4                       # 多跳拆解步数上限
+
+# 法规领域
+law:
+  default_status_filter: "现行有效"          # 默认仅检索现行有效版本
+  graph_enabled: false                       # Neo4j引用图谱(三期开)
+
+# ============ 任务队列 ============
+celery:
+  broker_url: redis://:${REDIS_PASSWORD}@localhost:6379/1
+  result_backend: redis://:${REDIS_PASSWORD}@localhost:6379/2
+  queues:
+    high_priority: {concurrency: 4}          # 解析/切分/向量化
+    low_priority: {concurrency: 2}           # 块级增强(LLM密集, 与在线错峰)
+
+# ============ 日志 ============
+logging:
+  level: INFO
+  query_log_enabled: true                    # 检索日志落query_logs(评估数据源)

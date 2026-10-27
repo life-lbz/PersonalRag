@@ -1,0 +1,47 @@
+# Web 框架
+fastapi
+uvicorn[standard]
+python-multipart
+sse-starlette
+
+# 数据库
+sqlalchemy[asyncio]>=2.0
+asyncpg
+alembic
+psycopg2-binary
+
+# 存储客户端
+redis
+pymilvus>=2.4
+minio
+
+# 任务队列
+celery[redis]
+
+# 编排
+langgraph
+langchain-core
+
+# 配置
+pydantic-settings
+PyYAML
+
+# HTTP 客户端
+httpx
+openai
+
+# 解析插件
+pdfplumber
+python-docx
+openpyxl
+python-pptx
+beautifulsoup4
+lxml
+mail-parser
+
+# 文本处理
+tiktoken
+
+# 工具
+python-dotenv
+loguru
