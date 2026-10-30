@@ -165,6 +165,21 @@ def _search(kb_id: str, vector, field: str, top_k: int, filter_expr: str | None,
     return out
 
 
+def existing_chunk_ids(kb_id: str, ids: list[str]) -> set[str]:
+    """返回给定 chunk_id 中已存在于 Milvus 的集合（H6 回滚向量覆盖度校验）。"""
+    if not ids:
+        return set()
+    _db_name, client = _ensure_kb_db(kb_id)
+    try:
+        rows = client.get(collection_name=_collection_name, ids=ids, output_fields=["chunk_id"])
+    except Exception:
+        # 兼容不支持 ids 参数的 pymilvus 版本：退化为过滤查询
+        id_list = ", ".join(f'"{i}"' for i in ids)
+        rows = client.query(collection_name=_collection_name,
+                            filter=f"chunk_id in [{id_list}]", output_fields=["chunk_id"])
+    return {r.get("chunk_id") for r in rows if r.get("chunk_id")}
+
+
 def delete_by_doc(kb_id: str, doc_id: str) -> None:
     _db_name, client = _ensure_kb_db(kb_id)
     client.delete(collection_name=_collection_name, filter=f'doc_id == "{doc_id}"')

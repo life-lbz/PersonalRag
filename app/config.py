@@ -48,6 +48,13 @@ class ServerConfig(BaseModel):
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
 
+class AuthConfig(BaseModel):
+    """API 鉴权（L5）：生产环境启用后，除 /health 外全部接口需 Bearer token 或 X-API-Key。"""
+
+    enabled: bool = False
+    tokens: list[str] = Field(default_factory=list)
+
+
 class PostgresConfig(BaseModel):
     dsn: str = ""
     sync_dsn: str = ""
@@ -130,6 +137,7 @@ class AutoQuestionConfig(BaseModel):
     enabled: bool = True
     questions_per_chunk: int = 3
     queue: str = "low_priority"
+    concurrency: int = 4  # M1: 并发生成问题的最大在途请求数
 
 
 class AutoKeywordConfig(BaseModel):
@@ -227,6 +235,7 @@ class LoggingConfig(BaseModel):
 class AppConfig(BaseModel):
     env: str = RAG_ENV
     server: ServerConfig = Field(default_factory=ServerConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     milvus: MilvusConfig = Field(default_factory=MilvusConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
@@ -273,13 +282,24 @@ def build_config() -> AppConfig:
 settings = build_config()
 
 # prod 下强制校验必填项与密钥非默认值（§1 配置管理约定）
+# 本地开发默认密钥集合：prod 环境一旦命中直接拒绝启动
+_KNOWN_DEFAULT_SECRETS = {
+    "rag_local_pwd", "redis_local_pwd", "minioadmin", "neo4j_local_pwd",
+    "postgres", "password", "changeme", "xxx", "",
+}
 if settings.env == "prod":
-    _required = {
+    _secrets = {
         "PG_PASSWORD": os.environ.get("PG_PASSWORD"),
         "REDIS_PASSWORD": os.environ.get("REDIS_PASSWORD"),
         "MINIO_ACCESS_KEY": os.environ.get("MINIO_ACCESS_KEY"),
         "MINIO_SECRET_KEY": os.environ.get("MINIO_SECRET_KEY"),
+        "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD"),
     }
-    missing = [k for k, v in _required.items() if not v or v in ("xxx", "")]
+    # 前 4 项为必填；Neo4j 密码仅在启用时要求非默认值
+    _required_keys = ("PG_PASSWORD", "REDIS_PASSWORD", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY")
+    missing = [k for k in _required_keys if not _secrets[k]]
+    weak = [k for k, v in _secrets.items() if v and v.lower() in _KNOWN_DEFAULT_SECRETS]
     if missing:
         raise RuntimeError(f"prod 环境缺少必填密钥: {missing}")
+    if weak:
+        raise RuntimeError(f"prod 环境仍在使用默认/弱密钥，请替换后再启动: {weak}")

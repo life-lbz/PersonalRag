@@ -135,3 +135,41 @@ def rollback_to_version(session: Session, doc: Document, target_version_no: int)
     doc.current_version = target.version
     session.flush()
     return True
+
+
+def sync_version_vectors(session: Session, doc: Document, version_no: int) -> dict:
+    """H6: 回滚后校验 Milvus 覆盖目标版本的全部检索块，缺失向量即时补写。
+
+    Milvus 不存储 searchable/version，检索可见性完全由 PG 的 searchable 决定；
+    这里兜底处理"向量此前被误删/未写入"的情况，避免回滚后 PG 可检索但 Milvus 无向量。
+    """
+    from app.clients import milvus_client
+
+    target = session.execute(
+        select(DocumentVersion).where(
+            DocumentVersion.doc_id == doc.id, DocumentVersion.version == version_no
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        return {"checked": 0, "missing": 0, "repaired": 0}
+
+    chunks = session.execute(
+        select(Chunk).where(Chunk.version_id == target.id)
+    ).scalars().all()
+    # 父块不参与向量召回
+    targets = [c for c in chunks if not (c.meta or {}).get("is_parent")]
+    if not targets:
+        return {"checked": 0, "missing": 0, "repaired": 0}
+
+    existing = milvus_client.existing_chunk_ids(doc.kb_id, [c.id for c in targets])
+    missing = [c for c in targets if c.id not in existing]
+    if missing:
+        from app.ingest.store import reindex_chunks
+
+        reindex_chunks(doc.kb_id, doc.doc_type or "general", missing)
+        logger.info("版本 %s 向量缺失 %d 块, 已补写", version_no, len(missing))
+
+    for c in targets:
+        if not c.milvus_id:
+            c.milvus_id = c.id
+    return {"checked": len(targets), "missing": len(missing), "repaired": len(missing)}

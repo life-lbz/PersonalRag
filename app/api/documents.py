@@ -10,9 +10,55 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db.session import get_async_session
 from app.models.entities import Document, DocumentVersion, IngestTask
+from app.observability import get_request_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
+
+ALLOWED_EXT = {".txt", ".md", ".pdf", ".docx", ".doc", ".html", ".htm", ".json", ".csv"}
+ALLOWED_MIME = {
+    "text/plain", "text/markdown", "text/x-markdown", "text/csv", "text/x-csv",
+    "text/html", "application/json", "application/csv", "application/vnd.ms-excel",
+    "application/pdf", "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+# 文件头魔数（H3）：防止把 .exe 改名为 .txt 绕过扩展名校验
+_MAGIC_BYTES = {
+    ".pdf": (b"%PDF-",),
+    ".docx": (b"PK\x03\x04",),
+    ".doc": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
+}
+_TEXT_EXTS = {".txt", ".md", ".json", ".csv", ".html", ".htm"}
+
+
+def _check_signature(ext: str, data: bytes) -> str | None:
+    """按扩展名校验文件头/内容特征，返回错误信息（None 表示通过）。"""
+    if ext in _MAGIC_BYTES:
+        if not any(data.startswith(sig) for sig in _MAGIC_BYTES[ext]):
+            return f"文件内容与扩展名 {ext} 不匹配（魔数校验失败）"
+        return None
+    if ext in (".html", ".htm"):
+        head = data[:2048].lstrip().lower()
+        if b"<html" not in head and b"<!doctype" not in head:
+            return "HTML 文件缺少 <!doctype> 或 <html> 标记"
+        return None
+    if ext == ".json":
+        head = data[:2048].lstrip()
+        if not head.startswith((b"{", b"[")):
+            return "JSON 文件必须以 { 或 [ 开头"
+        return None
+    if ext in _TEXT_EXTS:
+        head = data[:4096]
+        if b"\x00" in head:
+            return "文本文件包含二进制内容（NUL 字节）"
+        for enc in ("utf-8", "gbk"):
+            try:
+                head.decode(enc)
+                return None
+            except UnicodeDecodeError:
+                continue
+        return "文本文件不是有效的 UTF-8/GBK 编码"
+    return None
 
 
 @router.post("/upload")
@@ -33,25 +79,27 @@ async def upload_document(
     if version_policy not in ("replace", "coexist"):
         raise HTTPException(400, "version_policy 只能是 replace（覆盖式）或 coexist（并存式）")
 
-    # ③ 文件类型白名单
-    ALLOWED_EXT = {".txt", ".md", ".pdf", ".docx", ".doc", ".html", ".htm", ".json", ".csv"}
-    ALLOWED_MIME = {"text/plain", "text/markdown", "application/pdf",
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    "application/msword", "text/html", "application/json", "text/csv"}
+    # ③ 文件类型白名单（扩展名 + MIME）
     filename = file.filename or "unnamed.txt"
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext not in ALLOWED_EXT:
         raise HTTPException(
             400, f"不支持的文件类型: {ext or '无扩展名'}。支持: {', '.join(sorted(ALLOWED_EXT))}"
         )
+    mime = (file.content_type or "").split(";")[0].strip().lower()
+    if mime and mime != "application/octet-stream" and mime not in ALLOWED_MIME:
+        raise HTTPException(400, f"文件 MIME 类型不支持: {mime}")
 
-    # ③ 文件大小校验
+    # ④ 文件大小 + 内容特征校验
     max_bytes = settings.ingest.upload_max_mb * 1024 * 1024
     data = await file.read()
     if len(data) > max_bytes:
         raise HTTPException(413, f"文件超过 {settings.ingest.upload_max_mb}MB 上限")
     if not data:
         raise HTTPException(400, "空文件")
+    sig_error = _check_signature(ext, data)
+    if sig_error:
+        raise HTTPException(400, sig_error)
 
     # ④ 原文件落 MinIO
     from app.clients.minio_client import upload_bytes
@@ -72,6 +120,7 @@ async def upload_document(
     run_pipeline.apply_async(
         args=[task.id, data, filename, kb_id, doc_id, None, version_policy],
         queue="high_priority",
+        headers={"request_id": get_request_id()},  # L4: 链路 ID 透传到 Celery 任务
     )
     return {"task_id": task.id, "doc_id_hint": placeholder_doc, "version_policy": version_policy}
 
@@ -132,19 +181,21 @@ async def list_versions(doc_id: str, session: AsyncSession = Depends(get_async_s
 @router.post("/{doc_id}/versions/{version_no}/rollback")
 async def rollback(doc_id: str, version_no: int, session: AsyncSession = Depends(get_async_session)):
     from app.db.session import SyncSessionLocal
-    from app.ingest.version import rollback_to_version
+    from app.ingest.version import rollback_to_version, sync_version_vectors
 
     # rollback_to_version 是同步函数，用 SyncSession 调用
     with SyncSessionLocal() as sync_session:
         doc = sync_session.get(Document, doc_id)
         if doc is None:
             raise HTTPException(404, "文档不存在")
-        ok = rollback_to_version(sync_session, doc, version_no)
+        if not rollback_to_version(sync_session, doc, version_no):
+            raise HTTPException(400, "回滚失败: 版本不存在或已过清理窗口")
+        sync_session.commit()
+        # H6: 回滚后校验 Milvus 向量覆盖度，缺失则补写
+        vector_stats = sync_version_vectors(sync_session, doc, version_no)
         sync_session.commit()
 
-    if not ok:
-        raise HTTPException(400, "回滚失败: 版本不存在或已过清理窗口")
-    return {"status": "ok", "current_version": version_no}
+    return {"status": "ok", "current_version": version_no, "vector_sync": vector_stats}
 
 
 @router.patch("/{doc_id}")
@@ -167,7 +218,21 @@ async def delete_document(doc_id: str, session: AsyncSession = Depends(get_async
     doc = await session.get(Document, doc_id)
     if doc is None:
         raise HTTPException(404, "文档不存在")
+
+    # 入库进行中拒绝删除：避免删除与写入并发导致外键冲突/孤儿数据
+    running = (await session.execute(
+        select(IngestTask).where(
+            IngestTask.doc_id == doc_id,
+            IngestTask.status.in_(("pending", "running")),
+        ).limit(1)
+    )).scalar_one_or_none()
+    if running is not None:
+        raise HTTPException(409, "文档正在入库，请等待入库完成后再删除")
+
     doc.status = "deleting"
     await session.commit()
-    delete_document_task.apply_async(args=[doc_id], queue="high_priority")
+    delete_document_task.apply_async(
+        args=[doc_id], queue="high_priority",
+        headers={"request_id": get_request_id()},
+    )
     return {"status": "deleting"}

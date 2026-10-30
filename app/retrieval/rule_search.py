@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import re
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 
 from app.models.entities import Chunk, Document, LawArticle
 
@@ -32,6 +32,8 @@ async def rule_lookup(query: str, kb_id: str):
                 Document.kb_id == kb_id,
                 LawArticle.law_name == law_name,
                 LawArticle.article_no == article_no,
+                # 只取当前生效版本的法条，避免历史版本重复返回
+                LawArticle.version == cast(Document.current_version, String),
                 Chunk.meta["article_no"].astext == article_no,
                 Chunk.searchable.is_(True),
             )

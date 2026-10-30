@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_async_session
-from app.models.entities import Chunk, LawArticle
+from app.models.entities import Chunk, Document, LawArticle
 
 router = APIRouter(prefix="/api/v1/laws", tags=["laws"])
 
@@ -18,9 +18,15 @@ async def get_article(law_name: str, article_no: str, session: AsyncSession = De
         article_no = f"第{article_no}条"
     rows = (await session.execute(
         select(LawArticle, Chunk)
+        .join(Document, Document.id == LawArticle.doc_id)
         .join(Chunk, (Chunk.doc_id == LawArticle.doc_id)
               & (Chunk.meta["article_no"].astext == LawArticle.article_no))
-        .where(LawArticle.law_name == law_name, LawArticle.article_no == article_no)
+        .where(
+            LawArticle.law_name == law_name,
+            LawArticle.article_no == article_no,
+            # 只返回当前生效版本，历史版本法条不参与精确查询
+            LawArticle.version == cast(Document.current_version, String),
+        )
         .limit(5)
     )).all()
     if not rows:

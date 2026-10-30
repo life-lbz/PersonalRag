@@ -1,7 +1,6 @@
 """token 预算组装 + 父子块合并（§5.4 算法 + §3.3 优化点）。"""
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections import Counter
 
@@ -65,30 +64,32 @@ def _merge_siblings(reranked: list[ScoredChunk]) -> list[ScoredChunk]:
 
 
 def _load_parents_sync(parent_ids: set[str]) -> dict[str, ScoredChunk | None]:
-    from app.db.session import AsyncSessionLocal
-    from app.models.entities import Chunk
+    """父块加载（同步会话）。
 
-    async def _q():
-        async with AsyncSessionLocal() as session:
-            rows = (await session.execute(
-                select(Chunk).where(Chunk.id.in_(list(parent_ids)))
-            )).scalars().all()
-            return rows
+    不能用 asyncio.new_event_loop()：本函数在 FastAPI 请求的事件循环线程内被调用，
+    新建 loop 再 run_until_complete 会抛 "Cannot run the event loop while another loop
+    is running"，异常后所有命中子块都被打成“父块缺失”而丢弃，
+    表现为“命中 N 块但回答完全用不到文档内容”。
+    """
+    from app.db.session import SyncSessionLocal
+    from app.models.entities import Chunk, Document
 
     try:
-        loop = asyncio.new_event_loop()
-        try:
-            rows = loop.run_until_complete(_q())
-        finally:
-            loop.close()
+        with SyncSessionLocal() as session:
+            rows = session.execute(
+                select(Chunk, Document.title)
+                .outerjoin(Document, Document.id == Chunk.doc_id)
+                .where(Chunk.id.in_(list(parent_ids)))
+            ).all()
     except Exception:
         logger.exception("父块加载失败")
         return {pid: None for pid in parent_ids}
 
     out: dict[str, ScoredChunk | None] = {pid: None for pid in parent_ids}
-    for r in rows:
+    for r, title in rows:
         out[r.id] = ScoredChunk(chunk_id=r.id, content=r.content, token_count=r.token_count,
-                                doc_id=r.doc_id, metadata=r.meta or {},
+                                doc_id=r.doc_id, doc_title=title or "",
+                                parent_id=r.parent_id, metadata=r.meta or {},
                                 page=(r.meta or {}).get("page"))
     return out
 

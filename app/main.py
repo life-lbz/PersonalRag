@@ -1,27 +1,102 @@
 """FastAPI 入口。"""
 from __future__ import annotations
 
+import hmac
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp
 
 from app.api import chat, documents, kb, laws, search
 from app.config import settings
+from app.observability import (
+    bind_request_id,
+    get_request_id,
+    reset_request_id,
+    setup_logging,
+)
 
-logging.basicConfig(level=settings.logging.level,
-                    format="%(asctime)s %(name)s %(levelname)s %(message)s")
+setup_logging(settings.logging.level)
+
+# 免鉴权路径（容器探活/负载均衡健康检查）
+_PUBLIC_PATHS = {"/health"}
+
+
+def _scope_header(scope: dict, name: str) -> str:
+    for key, value in scope.get("headers", []):
+        if key.decode("latin-1").lower() == name:
+            return value.decode("latin-1")
+    return ""
+
+
+class ApiAuthMiddleware:
+    """L5: Bearer token / X-API-Key 鉴权（默认关闭，prod 在 config 中开启）。
+
+    用纯 ASGI 实现而非 BaseHTTPMiddleware：后者会包装响应体迭代器，
+    对 SSE 流式响应可能造成分块结束不完整（浏览器表现为 ERR_ABORTED）。
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or not settings.auth.enabled \
+                or scope.get("method") == "OPTIONS" \
+                or scope.get("path") in _PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+        api_key = _scope_header(scope, "x-api-key").strip()
+        auth = _scope_header(scope, "authorization")
+        token = api_key or (auth[7:].strip() if auth.lower().startswith("bearer ") else "")
+        if not token or not any(hmac.compare_digest(token, t) for t in settings.auth.tokens):
+            await JSONResponse({"detail": "unauthorized"}, status_code=401)(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+class RequestContextMiddleware:
+    """L4: 为每个请求建立 request_id 上下文并回写响应头，日志自动带上它。"""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        token = bind_request_id(_scope_header(scope, "x-request-id") or None)
+        rid = get_request_id()
+
+        async def send_with_header(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"x-request-id", rid.encode()))
+                message["headers"] = headers
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_header)
+        finally:
+            reset_request_id(token)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.getLogger("app").info("PersonalRag api-server 启动 (env=%s)", settings.env)
+    log = logging.getLogger("app")
+    log.info("PersonalRag api-server 启动 (env=%s)", settings.env)
+    if settings.auth.enabled and not settings.auth.tokens:
+        log.warning("auth.enabled=true 但 tokens 为空，所有业务接口都会被拒绝")
     yield
 
 
 app = FastAPI(title="PersonalRag", version="0.1.0", lifespan=lifespan)
 
+# 注册顺序 = 内层 → 外层（后注册的包住先注册的）
+app.add_middleware(ApiAuthMiddleware)
+app.add_middleware(RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.server.cors_origins,

@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -25,7 +26,12 @@ def gen_uuid() -> str:
 
 
 class Base(DeclarativeBase):
-    pass
+    """ORM 基类。
+
+    命名约定：凡 ORM 属性叫 `meta` 的模型（documents / document_versions / chunks），
+    数据库列名都是 `metadata`——因为 `metadata` 是 DeclarativeBase 的保留属性，
+    无法直接作为字段名。写 ORM 查询用 `.meta`，写原生 SQL 用 `metadata`。
+    """
 
 
 class KnowledgeBase(Base):
@@ -72,7 +78,10 @@ class DocumentVersion(Base):
     meta: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)  # 法规: effective_date/version_no 等
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = ({"comment": "UNIQUE(doc_id, version)"},)
+    # 真实唯一约束：同一文档不允许出现重复版本号（并发上传时的最终防线）
+    __table_args__ = (
+        UniqueConstraint("doc_id", "version", name="uq_document_versions_doc_id_version"),
+    )
 
 
 class Chunk(Base):

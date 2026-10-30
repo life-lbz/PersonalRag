@@ -31,14 +31,29 @@ async def generate_questions(content: str) -> list[str]:
         return []
 
 
-def generate_questions_sync(content: str) -> list[str]:
-    """Celery 线程池内调用。"""
+async def generate_questions_batch(contents: list[str], concurrency: int = 4) -> list[list[str]]:
+    """并发生成（M1）：信号量限制在途请求数，避免逐块串行带来的线性耗时。"""
+    if not contents:
+        return []
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _one(content: str) -> list[str]:
+        async with sem:
+            return await generate_questions(content)
+
+    return list(await asyncio.gather(*(_one(c) for c in contents)))
+
+
+def generate_questions_batch_sync(contents: list[str], concurrency: int = 4) -> list[list[str]]:
+    """Celery 线程池内调用：单事件循环内并发跑完全部块。"""
+    if not contents:
+        return []
     try:
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(generate_questions(content))
+            return loop.run_until_complete(generate_questions_batch(contents, concurrency))
         finally:
             loop.close()
     except Exception as e:  # 线程内无事件循环冲突时兜底
-        logger.warning("问题生成同步执行异常: %s", e)
-        return []
+        logger.warning("问题批量生成同步执行异常: %s", e)
+        return [[] for _ in contents]

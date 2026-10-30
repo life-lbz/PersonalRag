@@ -4,14 +4,19 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+# 与 model_services 默认模型目录保持一致（项目根/models），避免下载到别处导致服务找不到
+_MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+
 # allow_patterns 排除 onnx/colbert 示例图等非必需大文件
 COMMON_PATTERNS = [
     "*.json", "*.md", "*.txt", "sentencepiece.bpe.model",
 ]
 MODELS = [
-    ("BAAI/bge-m3", "C:/Users/20832/.cache/models/bge-m3",
+    ("BAAI/bge-m3", str(_MODELS_DIR / "bge-m3"),
      COMMON_PATTERNS + ["pytorch_model.bin", "colbert_linear.pt", "sparse_linear.pt"]),
-    ("BAAI/bge-reranker-base", "C:/Users/20832/.cache/models/bge-reranker-base",
+    ("BAAI/bge-reranker-base", str(_MODELS_DIR / "bge-reranker-base"),
      COMMON_PATTERNS + ["pytorch_model.bin"]),
 ]
 

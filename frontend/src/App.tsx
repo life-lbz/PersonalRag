@@ -3,7 +3,6 @@ import {
   chatStream,
   createKB,
   deleteDoc,
-  docStatus,
   listDocs,
   listKBs,
   renameKB,
@@ -12,6 +11,13 @@ import {
   uploadDoc,
 } from "./api";
 import type { ChatMessage, DocumentItem, KnowledgeBase } from "./types";
+
+/** 开发环境才输出错误日志，生产不把细节打到 console（L2）。 */
+const logError = (...args: unknown[]) => {
+  if (import.meta.env.DEV) {
+    console.error(...args);
+  }
+};
 
 const App: React.FC = () => {
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
@@ -22,6 +28,7 @@ const App: React.FC = () => {
   const [streaming, setStreaming] = useState(false);
   const [sessionId] = useState(() => crypto.randomUUID());
   const bottomRef = useRef<HTMLDivElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   // Modal 状态（替换 prompt/confirm）
   const [modal, setModal] = useState<{
@@ -56,25 +63,23 @@ const App: React.FC = () => {
   }, [kbId]);
 
   useEffect(() => {
-    refreshKBs().catch(console.error);
+    refreshKBs().catch(logError);
   }, [refreshKBs]);
 
   useEffect(() => {
-    refreshDocs().catch(console.error);
+    refreshDocs().catch(logError);
   }, [refreshDocs]);
 
-  // 轮询入库状态（有 processing 文档时）
+  // 轮询入库/删除状态（有 processing/deleting 文档时）：一次列表请求刷新全部，避免按文档逐个请求（M3）
   useEffect(() => {
-    const hasProcessing = docs.some((d) => d.status === "processing");
-    if (!hasProcessing) return;
-    const timer = setInterval(async () => {
-      for (const d of docs.filter((x) => x.status === "processing")) {
-        try {
-          const s = await docStatus(d.id);
-          if (s.status === "done" || s.status === "failed") refreshDocs();
-        } catch { /* ignore */ }
-      }
-    }, 3000);
+    const hasPending = docs.some((d) => d.status === "processing" || d.status === "deleting");
+    if (!hasPending) return;
+    // 删除任务通常较快，用更短的间隔（1.5s）；入库较慢用 3s
+    const hasDeleting = docs.some((d) => d.status === "deleting");
+    const interval = hasDeleting ? 1500 : 3000;
+    const timer = setInterval(() => {
+      refreshDocs().catch(logError);
+    }, interval);
     return () => clearInterval(timer);
   }, [docs, refreshDocs]);
 
@@ -156,15 +161,13 @@ const App: React.FC = () => {
 
   const closeUpload = () => setUploadModal((u) => ({ ...u, open: false }));
 
-  // Modal 里选完策略后 → 触发隐藏 file input
-  const handleUploadConfirm = () => {
-    const input = document.getElementById("upload-file-input") as HTMLInputElement | null;
-    input?.click();
-  };
+  // Modal 里选完策略后 → 触发 Modal 内的 file input（Modal 关闭时该 input 已卸载，H4）
+  const handleUploadConfirm = () => uploadInputRef.current?.click();
 
   // 选完文件 → 真正上传
   const handleUploadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";  // 先重置，允许再次选择同一文件
     if (!file) return;
     const policy = uploadModal.policy;
     closeUpload();
@@ -173,8 +176,6 @@ const App: React.FC = () => {
       await refreshDocs();
     } catch (err) {
       notifyError("上传文档", err);
-    } finally {
-      e.target.value = "";
     }
   };
 
@@ -294,14 +295,6 @@ const App: React.FC = () => {
             <label className="upload-btn" onClick={openUpload}>
               + 上传
             </label>
-            {/* 隐藏的文件选择器，被 uploadModal 触发 */}
-            <input
-              id="upload-file-input"
-              type="file"
-              hidden
-              onChange={handleUploadFile}
-              accept=".pdf,.docx,.md,.txt,.json,.csv,.html"
-            />
           </div>
           <div className="doc-list">
             {docs.map((d) => (
@@ -454,6 +447,14 @@ const App: React.FC = () => {
               <button onClick={closeUpload}>取消</button>
               <button className="primary" onClick={handleUploadConfirm}>选择文件…</button>
             </div>
+            {/* 文件选择器随 Modal 一起挂载/卸载，取消后不会再弹出系统文件框 */}
+            <input
+              ref={uploadInputRef}
+              type="file"
+              hidden
+              onChange={handleUploadFile}
+              accept=".pdf,.docx,.md,.txt,.json,.csv,.html"
+            />
           </div>
         </div>
       )}

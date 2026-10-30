@@ -8,12 +8,13 @@ SSE 事件：
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db.session import get_async_session
 from app.models.entities import QueryLog
+from app.observability import get_request_id
 from app.retrieval.generator import generate_stream
 from app.retrieval.workflow import run_retrieval
 
@@ -40,9 +42,9 @@ def _sse(payload: dict) -> str:
 
 
 @router.post("/chat/completions")
-async def chat_completions(body: ChatRequest, session: AsyncSession = Depends(get_async_session)):
+async def chat_completions(body: ChatRequest, request: Request,
+                           session: AsyncSession = Depends(get_async_session)):
     from app.models.entities import KnowledgeBase
-    from app.config import settings
 
     # C5: KB 存在性校验（快速失败，不入流）
     if not body.kb_id:
@@ -56,13 +58,15 @@ async def chat_completions(body: ChatRequest, session: AsyncSession = Depends(ge
 
     session_id = body.session_id or str(uuid.uuid4())
     log_id = str(uuid.uuid4())
+    request_id = get_request_id()
 
     async def event_stream():
         t0 = time.time()
         answer_parts: list[str] = []
         try:
             state = await run_retrieval(body.query, body.kb_id, session_id, body.mode)
-            yield _sse({"route": state.route, "session_id": session_id, "log_id": log_id})
+            yield _sse({"route": state.route, "session_id": session_id, "log_id": log_id,
+                        "request_id": request_id})
 
             if state.error_code == "REFUSE":
                 yield _sse({"delta": "根据现有知识库内容无法回答该问题。"})
@@ -73,6 +77,9 @@ async def chat_completions(body: ChatRequest, session: AsyncSession = Depends(ge
             if state.route == "direct_answer":
                 # 直答：无检索上下文
                 async for delta in generate_stream("", body.query):
+                    if await request.is_disconnected():
+                        logger.info("客户端已断开, 终止生成 log_id=%s", log_id)
+                        return
                     answer_parts.append(delta)
                     yield _sse({"delta": delta})
             else:
@@ -90,6 +97,9 @@ async def chat_completions(body: ChatRequest, session: AsyncSession = Depends(ge
                         yield _sse({"delta": piece})
                 else:
                     async for delta in generate_stream(state.context, body.query):
+                        if await request.is_disconnected():
+                            logger.info("客户端已断开, 终止生成 log_id=%s", log_id)
+                            return
                         answer_parts.append(delta)
                         yield _sse({"delta": delta})
 
@@ -105,10 +115,14 @@ async def chat_completions(body: ChatRequest, session: AsyncSession = Depends(ge
             yield _sse({"citations": citations})
             yield _sse({"route": state.route, "latency_ms": int((time.time() - t0) * 1000), "done": True})
             await _save_log(log_id, session_id, body, state, answer, session, citations)
+            # 结束前额外发一个 SSE 注释帧并短暂等待，确保浏览器读完终止块后再由服务端关闭连接，
+            # 否则 Chrome 会将该请求标记为 net::ERR_ABORTED（数据虽完整但控制台报错）。
+            yield ": end\n\n"
+            await asyncio.sleep(0.2)
         except Exception as e:
             logger.exception("chat 异常")
             # C4: 生产环境不暴露堆栈给前端，只给通用错误
-            if settings.debug:
+            if settings.env != "prod":
                 msg = str(e)[:500]
             else:
                 msg = "服务器内部错误, 请稍后重试"

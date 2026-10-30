@@ -8,7 +8,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app.models.entities import Chunk, LawArticle
+from app.models.entities import Chunk, DocumentVersion, LawArticle
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,13 @@ def write_chunks(session: Session, doc_id: str, version_id: str, kb_id: str, doc
         if pid and pid.startswith("PARENT_"):
             idx = int(pid.split("_")[1])
             c.parent_id = parents[idx].chunk_id
+
+    # chunk_index：子块按解析顺序 0..n-1；父块取其覆盖子块的最小序号
+    # （chunk_id 是 hash，没有顺序信息，必须显式落库才能按原文顺序重排）
+    index_map: dict[str, int] = {c.chunk_id: i for i, c in enumerate(children)}
+    for p in parents:
+        covered = [index_map[c.chunk_id] for c in children if c.parent_id == p.chunk_id]
+        index_map[p.chunk_id] = min(covered) if covered else None
 
     rows: list[Chunk] = []
     for p in parents:
@@ -57,6 +64,7 @@ def write_chunks(session: Session, doc_id: str, version_id: str, kb_id: str, doc
                 id=c.chunk_id,
                 version_id=version_id,
                 doc_id=doc_id,
+                chunk_index=index_map.get(c.chunk_id),
                 parent_id=c.parent_id,
                 prev_id=c.prev_id,
                 next_id=c.next_id,
@@ -68,8 +76,14 @@ def write_chunks(session: Session, doc_id: str, version_id: str, kb_id: str, doc
             )
         )
 
-    # 法规扩展表
+    # 法规扩展表：version 取 document_versions 的真实版本号，status 优先取解析元数据
     if doc_type == "law":
+        dv = session.get(DocumentVersion, version_id)
+        version_no = str(dv.version) if dv is not None else "1"
+        # 幂等：同一文档同一版本重跑时先清掉旧行，避免重复法条
+        session.query(LawArticle).filter(
+            LawArticle.doc_id == doc_id, LawArticle.version == version_no
+        ).delete(synchronize_session=False)
         for c in children:
             md = c.metadata or {}
             if not md.get("article_no"):
@@ -81,8 +95,8 @@ def write_chunks(session: Session, doc_id: str, version_id: str, kb_id: str, doc
                     article_no=md.get("article_no"),
                     chapter_path=md.get("chapter_path"),
                     effective_date=_parse_date(md.get("effective_date") or law_effective),
-                    status="现行有效",
-                    version="v1",
+                    status=md.get("status") or "现行有效",
+                    version=version_no,
                 )
             )
     session.flush()
@@ -140,13 +154,15 @@ def write_milvus(session: Session, kb_id: str, doc_type: str, version_id: str,
         q_index[cid] = idxs
         question_texts.extend(qs if qs else [c.content])  # 无问题向量时占位(与正文同)
 
-    if content_texts:
-        dense_all, sparse_all = embed_texts_sync(content_texts)
+    # M2: 正文 + 问题合并成一次 embedding 调用（按 batch_size 内部切批），减少网络往返
+    all_texts = content_texts + question_texts
+    if all_texts:
+        all_dense, all_sparse = embed_texts_sync(all_texts)
+        dense_all = all_dense[: len(content_texts)]
+        sparse_all = all_sparse[: len(content_texts)]
+        q_dense = all_dense[len(content_texts):]
     else:
-        dense_all, sparse_all = [], []
-    q_dense = []
-    if question_texts:
-        q_dense, _ = embed_texts_sync(question_texts)
+        dense_all, sparse_all, q_dense = [], [], []
 
     rows = []
     it_content = 0
@@ -176,6 +192,23 @@ def write_milvus(session: Session, kb_id: str, doc_type: str, version_id: str,
     for c in target:
         c.milvus_id = c.id
     session.flush()
+    return len(rows)
+
+
+def reindex_chunks(kb_id: str, doc_type: str, chunks: list[Chunk]) -> int:
+    """为指定 PG chunks 补写 Milvus 向量（H6：回滚后覆盖度校验发现缺失时调用）。"""
+    from app.clients import milvus_client
+    from app.ingest.embedder import embed_texts_sync
+
+    if not chunks:
+        return 0
+    dense_all, sparse_all = embed_texts_sync([c.content for c in chunks])
+    rows = [{
+        "chunk_id": c.id, "doc_id": c.doc_id, "kb_id": kb_id, "doc_type": doc_type,
+        "dense_vector": dense, "question_vector": dense,
+        "sparse_vector": _to_milvus_sparse(sparse),
+    } for c, dense, sparse in zip(chunks, dense_all, sparse_all)]
+    milvus_client.upsert_chunks(kb_id, rows)
     return len(rows)
 
 

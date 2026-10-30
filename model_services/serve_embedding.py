@@ -5,16 +5,33 @@
 from __future__ import annotations
 
 import os
+import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+import app._platform_fix  # noqa: E402  Windows 下短路 WMI 平台查询, 避免首次加载模型时卡死
 
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-MODEL_DIR = os.environ.get("BGE_M3_DIR", "C:/Users/20832/.cache/models/bge-m3")
+_DEFAULT_MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "bge-m3"
+MODEL_DIR = os.environ.get("BGE_M3_DIR", str(_DEFAULT_MODEL_DIR))
 USE_FP16 = os.environ.get("BGE_USE_FP16", "0") == "1"  # 本机显存留给LLM, 默认CPU fp32
 PORT = int(os.environ.get("EMBED_PORT", "8001"))
 
-app = FastAPI(title="bge-m3 embedding service")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """启动即加载模型：health 就绪即代表模型可用，避免首个业务请求冷加载超时。"""
+    get_model()
+    yield
+
+
+app = FastAPI(title="bge-m3 embedding service", lifespan=_lifespan)
 _model = None
 
 

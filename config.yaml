@@ -5,6 +5,11 @@ server:
   workers: 2
   cors_origins: ["http://localhost:5173"]
 
+# API 鉴权（L5）：生产环境开启后，除 /health 外全部接口需 Bearer token 或 X-API-Key
+auth:
+  enabled: false                             # prod 置 true 并配置 tokens
+  tokens: []                                 # 可用环境变量 RAG_AUTH__TOKENS='["xxx"]' 覆盖
+
 # ============ 存储连接 ============
 postgres:
   dsn: postgresql+asyncpg://postgres:${PG_PASSWORD}@localhost:5432/rag
@@ -84,6 +89,7 @@ ingest:
       enabled: true                          # P0 核心项
       questions_per_chunk: 3
       queue: low_priority                    # 闲时队列
+      concurrency: 4                         # 并发生成问题的最大在途请求数
     auto_keyword:
       enabled: false                         # P1 再开
       topn: 5
@@ -105,7 +111,7 @@ retrieve:
     vector_weight: 0.3                       # weighted模式: 综合分=w×cosine+(1-w)×全文分
   kb_boost: {}                               # 知识库静态加权
   rerank:
-    score_threshold: 0.2                     # rerank分硬过滤(按reranker-base标定)
+    score_threshold: 0.05                    # rerank分硬过滤(0.05+兜底vector-top3双保险)
     top_n: 5
     candidate_pool_max: 400                  # 进入rerank的候选上限
   version_filter: searchable_only            # 仅检索 searchable=true 的块
@@ -118,7 +124,7 @@ assemble:
   context_window: 8192                       # 与 llm.context_window 一致
   max_output: 1024
   prompt_overhead: 800                       # 模板+指令预留token
-  merge_sibling_chunks: true                 # 同父子块命中≥2合并返回父块
+  merge_sibling_chunks: false                # 同父子块命中≥2合并返回父块（已关闭：父块覆盖太泛导致多样性丢失）
   truncation: keep_head_tail                 # 末篇超预算: 保头尾截中间
 
 # 路由(LangGraph四通道)

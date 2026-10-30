@@ -45,3 +45,6 @@ tiktoken
 # 工具
 python-dotenv
 loguru
+
+# 测试
+pytest

@@ -94,6 +94,23 @@ async def hybrid_search(query: str, kb_id: str, top_k: int | None = None) -> lis
     passed = [c for c in candidates if c.rerank_score >= cfg.rerank.score_threshold]
     passed.sort(key=lambda x: -(x.rerank_score or 0))
     result = passed[: cfg.rerank.top_n]
+    # 兜底：rerank 一个都没过（短问句/模糊问题常见），融合 vector + sparse 各取 top3 去重
+    # 保证即使 rerank 全军覆没，语义和关键词两路都有机会贡献块进 context
+    if not result:
+        v_top = sorted(candidates, key=lambda x: -(x.cosine or 0))[:3]
+        s_top = sorted(candidates, key=lambda x: -(x.fulltext or 0))[:3]
+        seen: set[str] = set()
+        fallback: list[ScoredChunk] = []
+        for c in v_top + s_top:
+            if c.chunk_id not in seen:
+                seen.add(c.chunk_id)
+                fallback.append(c)
+        fallback = fallback[: cfg.rerank.top_n]  # 与 rerank top_n 保持一致
+        logger.warning(
+            "rerank 通过=0, 降级 vector+sparse-top%d (threshold=%.2f, v=%d s=%d)",
+            len(fallback), cfg.rerank.score_threshold, len(v_top), len(s_top),
+        )
+        result = fallback
     logger.info("检索 %s: 候选%d → searchable后%d → rerank通过%d → 取%d",
                 query[:20], len(scored), len(candidates), len(passed), len(result))
     return result

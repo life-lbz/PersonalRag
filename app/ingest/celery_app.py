@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from celery import Celery
+from celery.schedules import crontab
+from celery.signals import setup_logging as celery_setup_logging
 
 from app.config import settings
+from app.observability import setup_logging
 
 celery_app = Celery(
     "personal_rag",
@@ -21,4 +24,20 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,
     # Windows: 由启动参数指定 --pool=threads / solo
+    timezone="Asia/Shanghai",
+    enable_utc=False,
+    # 定时任务：每日 03:00 清理已过 purge_after 窗口的 archived 版本
+    beat_schedule={
+        "purge-archived-versions": {
+            "task": "ingest.purge_archived",
+            "schedule": crontab(hour=3, minute=0),
+            "options": {"queue": "high_priority"},
+        },
+    },
 )
+
+
+@celery_setup_logging.connect
+def _configure_worker_logging(**_kwargs) -> None:
+    """L4: worker 日志与 API 使用同一格式（含 request_id）。"""
+    setup_logging(settings.logging.level)

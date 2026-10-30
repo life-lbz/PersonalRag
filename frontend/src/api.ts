@@ -1,6 +1,6 @@
 import type { ChatMessage, Citation, DocumentItem, IngestStatus, KnowledgeBase } from "./types";
 
-const BASE = "/api/v1";
+const BASE = import.meta.env.VITE_API_BASE ?? "/api/v1";
 
 async function json<T>(resp: Response): Promise<T> {
   if (!resp.ok) {
@@ -70,7 +70,7 @@ export interface ChatStreamHandlers {
   onError: (code: string, message: string) => void;
 }
 
-/** SSE 问答（POST + fetch 流式解析, 按接口契约事件分发）。 */
+/** SSE 问答（POST + fetch 流式读取 getReader, 真正增量到达即回调）。 */
 export async function chatStream(
   kbId: string,
   query: string,
@@ -86,28 +86,44 @@ export async function chatStream(
   if (!resp.ok || !resp.body) {
     throw new Error(`chat failed: ${resp.status}`);
   }
+
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const parts = buf.split("\n\n");
-    buf = parts.pop() ?? "";
-    for (const part of parts) {
-      const line = part.trim();
-      if (!line.startsWith("data:")) continue;
-      try {
-        const ev = JSON.parse(line.slice(5).trim());
-        if (ev.error) handlers.onError(ev.error.code, ev.error.message);
-        else if (ev.citations) handlers.onCitations(ev.citations);
-        else if (ev.done) handlers.onDone(ev.route ?? "", ev.latency_ms ?? 0);
-        else if (ev.delta) handlers.onDelta(ev.delta);
-        else if (ev.route) handlers.onMeta(ev.route, ev.log_id ?? "");
-      } catch {
-        /* 忽略不完整事件 */
+  let buffer = "";
+
+  const processEvent = (raw: string) => {
+    const line = raw.trim();
+    if (!line.startsWith("data:")) return;
+    let ev: Record<string, unknown>;
+    try {
+      ev = JSON.parse(line.slice(5).trim());
+    } catch {
+      return;
+    }
+    if (ev.error) handlers.onError((ev.error as { code: string; message: string }).code, (ev.error as { message: string }).message);
+    else if (ev.citations) handlers.onCitations(ev.citations as Citation[]);
+    else if (ev.done) handlers.onDone((ev.route as string) ?? "", (ev.latency_ms as number) ?? 0);
+    else if (ev.delta) handlers.onDelta(ev.delta as string);
+    else if (ev.route) handlers.onMeta(ev.route as string, (ev.log_id as string) ?? "");
+  };
+
+  try {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // SSE 事件以 \n\n 分隔，按边界切分
+      let idx: number;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const event = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        if (event.trim()) processEvent(event);
       }
     }
+    // 处理缓冲区里最后残留的事件
+    if (buffer.trim()) processEvent(buffer);
+  } finally {
+    reader.releaseLock();
   }
 }
