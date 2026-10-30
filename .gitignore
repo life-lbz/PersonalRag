@@ -12,4 +12,5 @@ dist/
 logs/
 .tmp/
 .DS_Store
-models/
+models/*
+!models/README.md
