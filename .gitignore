@@ -13,4 +13,4 @@ logs/
 .tmp/
 .DS_Store
 models/*
-!models/README.md
+!models/模型层说明.md

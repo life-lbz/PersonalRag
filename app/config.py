@@ -100,8 +100,8 @@ class RerankConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    base_url: str = "http://localhost:11434/v1"
-    model: str = "qwen2.5:3b-instruct-q4_K_M"
+    base_url: str = "http://localhost:11434/v1"  # 经 SSH 隧道到 AutoDL vLLM
+    model: str = "Qwen3-30B-A3B-Instruct-2507"
     temperature: float = 0.1
     max_output_tokens: int = 1024
     context_window: int = 8192

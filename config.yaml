@@ -38,22 +38,22 @@ minio:
 # ============ 模型服务(独立推理服务, HTTP) ============
 models:
   embedding:
-    base_url: http://localhost:8001
+    base_url: http://localhost:8001          # 经 SSH 隧道转发到 AutoDL(:8001), 本机不再保留模型文件
     model: bge-m3
     dim: 1024
     batch_size: 16
     timeout: 120
   rerank:
-    base_url: http://localhost:8002
+    base_url: http://localhost:8002          # 经 SSH 隧道转发到 AutoDL(:8002)
     model: bge-reranker-base                # 方案E选定(280M, CPU快一倍); 提质可换 bge-reranker-large 并把 score_threshold 调回0.35附近重验
     batch_size: 64
     timeout: 120
   llm:
-    base_url: http://localhost:11434/v1     # Ollama, OpenAI 兼容接口
-    model: qwen2.5:3b-instruct-q4_K_M       # 已选定(本机4G显存全进, 20-40 tok/s)
+    base_url: http://localhost:11434/v1     # 经 SSH 隧道转发到 AutoDL vLLM(:8000), OpenAI 兼容接口
+    model: Qwen3-30B-A3B-Instruct-2507      # AutoDL 部署, 与 vLLM --served-model-name 一致 (MoE 30B/AWQ-4bit)
     temperature: 0.1
     max_output_tokens: 1024
-    context_window: 8192                    # Ollama侧 num_ctx 降为4096时, 此值与 assemble.context_window 同步降
+    context_window: 8192                    # 与 vLLM --max-model-len 8192 一致; 调整时需两侧同步
     timeout: 180
 
 # ============ 离线入库 ============
