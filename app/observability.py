@@ -40,13 +40,38 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
-def setup_logging(level: str = "INFO") -> None:
-    """统一日志格式（含 request_id）。API 与 Celery worker 共用。"""
-    handler = logging.StreamHandler()
-    handler.addFilter(RequestIdFilter())
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(request_id)s] %(name)s %(levelname)s %(message)s"
-    ))
+def setup_logging(level: str = "INFO", log_name: str = "app") -> None:
+    """统一日志（含 request_id）：控制台 + 文件双写。API 与 Celery worker 共用。
+
+    文件：logs/{log_name}-{pid}.log，按天轮转（TimedRotatingFileHandler），
+    保留 logging.file_max_days 天；带 pid 是避免多进程（uvicorn workers）轮转时抢文件锁。
+    """
+    fmt = logging.Formatter("%(asctime)s [%(request_id)s] %(name)s %(levelname)s %(message)s")
+
+    console = logging.StreamHandler()
+    console.addFilter(RequestIdFilter())
+    console.setFormatter(fmt)
+
+    handlers: list[logging.Handler] = [console]
+
+    from app.config import PROJECT_ROOT, settings
+
+    if settings.logging.file_enabled:
+        log_dir = PROJECT_ROOT / settings.logging.dir
+        log_dir.mkdir(parents=True, exist_ok=True)
+        import os
+        from logging.handlers import TimedRotatingFileHandler
+
+        file_handler = TimedRotatingFileHandler(
+            log_dir / f"{log_name}-{os.getpid()}.log",
+            when="midnight",
+            backupCount=settings.logging.file_max_days,
+            encoding="utf-8",
+        )
+        file_handler.addFilter(RequestIdFilter())
+        file_handler.setFormatter(fmt)
+        handlers.append(file_handler)
+
     root = logging.getLogger()
     root.setLevel(level)
-    root.handlers = [handler]
+    root.handlers = handlers

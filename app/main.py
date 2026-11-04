@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.types import ASGIApp
 
 from app.api import chat, documents, kb, laws, search
@@ -19,7 +19,7 @@ from app.observability import (
     setup_logging,
 )
 
-setup_logging(settings.logging.level)
+setup_logging(settings.logging.level, log_name="api")
 
 # 免鉴权路径（容器探活/负载均衡健康检查）
 _PUBLIC_PATHS = {"/health"}
@@ -43,9 +43,12 @@ class ApiAuthMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send) -> None:
+        path = scope.get("path", "")
         if scope["type"] != "http" or not settings.auth.enabled \
                 or scope.get("method") == "OPTIONS" \
-                or scope.get("path") in _PUBLIC_PATHS:
+                or path in _PUBLIC_PATHS \
+                or not path.startswith("/api/"):
+            # 仅保护 /api/** 业务接口；前端静态资源与 SPA 页面公开（不含数据）
             await self.app(scope, receive, send)
             return
         api_key = _scope_header(scope, "x-api-key").strip()
@@ -156,3 +159,32 @@ async def health():
 
     ok = all(v == "ok" for v in checks.values())
     return {"status": "ok" if ok else "degraded", "checks": checks}
+
+
+# ---------- 前端生产托管：FastAPI 直接服务 frontend/dist（同源部署，免 CORS） ----------
+from app.config import PROJECT_ROOT  # noqa: E402
+
+_DIST = PROJECT_ROOT / "frontend" / "dist"
+
+
+def _no_cache_html(path):  # index.html 不缓存，assets 走内容 hash 长缓存
+    return FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+
+if _DIST.is_dir():
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa(full_path: str):
+        """SPA 托管：已存在的静态文件直接返回，其余路径回退 index.html（前端路由）。"""
+        if full_path.startswith("api/"):
+            return JSONResponse({"detail": "not found"}, status_code=404)
+        if full_path:
+            file = _DIST / full_path
+            if file.is_file():
+                # vite 产物 assets/ 文件名带内容 hash，可长缓存
+                headers = {"Cache-Control": "public, max-age=31536000, immutable"} \
+                    if full_path.startswith("assets/") else {}
+                return FileResponse(file, headers=headers)
+        return _no_cache_html(_DIST / "index.html")
+else:
+    logging.getLogger("app").warning("frontend/dist 不存在，API 以纯接口模式运行（先执行 npm run build）")

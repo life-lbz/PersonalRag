@@ -40,10 +40,10 @@ def write_chunks(session: Session, doc_id: str, version_id: str, kb_id: str, doc
         index_map[p.chunk_id] = min(covered) if covered else None
 
     rows: list[Chunk] = []
+    rows.extend(children)  # 检索块优先保留：小文档父块与子块内容相同（chunk_id 相同）时，必须留下可向量化的子块
     for p in parents:
         p.metadata = {**p.metadata, "is_parent": True}
         rows.append(p)
-    rows.extend(children)
     # 去重（父子同块时 chunk_id 相同）；失败续跑时先清理残留
     seen: set[str] = set()
     deduped: list[Chunk] = []
@@ -53,6 +53,11 @@ def write_chunks(session: Session, doc_id: str, version_id: str, kb_id: str, doc
         seen.add(c.chunk_id)
         deduped.append(c)
     rows = deduped
+    # 父块被去重丢弃时，子块的 parent_id 成为悬挂引用（甚至自引用），置空
+    kept = {c.chunk_id for c in rows}
+    for c in rows:
+        if c.parent_id and c.parent_id not in kept:
+            c.parent_id = None
     session.query(Chunk).filter(Chunk.version_id == version_id).delete(
         synchronize_session=False
     )

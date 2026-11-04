@@ -230,6 +230,9 @@ class CeleryConfig(BaseModel):
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     query_log_enabled: bool = True
+    file_enabled: bool = True          # 日志落文件（logs/ 目录，按天轮转）
+    dir: str = "logs"
+    file_max_days: int = 14            # 轮转保留天数
 
 
 class AppConfig(BaseModel):

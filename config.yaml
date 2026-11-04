@@ -7,8 +7,8 @@ server:
 
 # API 鉴权（L5）：生产环境开启后，除 /health 外全部接口需 Bearer token 或 X-API-Key
 auth:
-  enabled: false                             # prod 置 true 并配置 tokens
-  tokens: []                                 # 可用环境变量 RAG_AUTH__TOKENS='["xxx"]' 覆盖
+  enabled: true                              # 已开启：除 /health 与前端静态资源外，/api/** 需 Bearer token
+  tokens: []                                 # token 在 .env 的 RAG_AUTH__TOKENS 中配置（不入库）
 
 # ============ 存储连接 ============
 postgres:
@@ -151,3 +151,6 @@ celery:
 logging:
   level: INFO
   query_log_enabled: true                    # 检索日志落query_logs(评估数据源)
+  file_enabled: true                         # 日志落文件（控制台仍保留）
+  dir: logs                                  # logs/api-{pid}.log、logs/celery-{pid}.log
+  file_max_days: 14                          # 按天轮转，保留 14 天

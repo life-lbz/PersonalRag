@@ -39,5 +39,5 @@ celery_app.conf.update(
 
 @celery_setup_logging.connect
 def _configure_worker_logging(**_kwargs) -> None:
-    """L4: worker 日志与 API 使用同一格式（含 request_id）。"""
-    setup_logging(settings.logging.level)
+    """L4: worker 日志与 API 同一格式（含 request_id），落 logs/celery-*.log。"""
+    setup_logging(settings.logging.level, log_name="celery")

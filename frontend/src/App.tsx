@@ -8,6 +8,8 @@ import {
   renameKB,
   rollbackDoc,
   sendFeedback,
+  setToken,
+  UnauthorizedError,
   uploadDoc,
 } from "./api";
 import type { ChatMessage, DocumentItem, KnowledgeBase } from "./types";
@@ -26,9 +28,11 @@ const App: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false); // 401 时弹出令牌输入
   const [sessionId] = useState(() => crypto.randomUUID());
   const bottomRef = useRef<HTMLDivElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const tokenInputRef = useRef<HTMLInputElement>(null);
 
   // Modal 状态（替换 prompt/confirm）
   const [modal, setModal] = useState<{
@@ -62,13 +66,31 @@ const App: React.FC = () => {
     setDocs(await listDocs(kbId));
   }, [kbId]);
 
-  useEffect(() => {
-    refreshKBs().catch(logError);
+  // 统一处理：401 → 弹出令牌输入；其余错误仅记录
+  const catchAuth = useCallback((e: unknown) => {
+    if (e instanceof UnauthorizedError) setAuthOpen(true);
+    else logError(e);
+  }, []);
+
+  const submitToken = useCallback(async (val: string) => {
+    if (!val.trim()) return;
+    setToken(val);
+    try {
+      await refreshKBs();
+      setAuthOpen(false);
+    } catch (e) {
+      if (e instanceof UnauthorizedError) alert("令牌无效，请重新输入");
+      else { setAuthOpen(false); logError(e); }
+    }
   }, [refreshKBs]);
 
   useEffect(() => {
-    refreshDocs().catch(logError);
-  }, [refreshDocs]);
+    refreshKBs().catch(catchAuth);
+  }, [refreshKBs, catchAuth]);
+
+  useEffect(() => {
+    refreshDocs().catch(catchAuth);
+  }, [refreshDocs, catchAuth]);
 
   // 轮询入库/删除状态（有 processing/deleting 文档时）：一次列表请求刷新全部，避免按文档逐个请求（M3）
   useEffect(() => {
@@ -78,16 +100,17 @@ const App: React.FC = () => {
     const hasDeleting = docs.some((d) => d.status === "deleting");
     const interval = hasDeleting ? 1500 : 3000;
     const timer = setInterval(() => {
-      refreshDocs().catch(logError);
+      refreshDocs().catch(catchAuth);
     }, interval);
     return () => clearInterval(timer);
-  }, [docs, refreshDocs]);
+  }, [docs, refreshDocs, catchAuth]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
   const notifyError = (action: string, e: unknown) => {
+    if (e instanceof UnauthorizedError) { setAuthOpen(true); return; }
     alert(`${action}失败: ${e instanceof Error ? e.message : String(e)}`);
   };
 
@@ -240,7 +263,8 @@ const App: React.FC = () => {
         onError: (code, message) => updateLast({ error: `${code}: ${message}` }),
       });
     } catch (e) {
-      updateLast({ error: String(e) });
+      if (e instanceof UnauthorizedError) setAuthOpen(true);
+      updateLast({ error: e instanceof UnauthorizedError ? "访问令牌缺失或无效" : String(e) });
     } finally {
       setStreaming(false);
     }
@@ -455,6 +479,29 @@ const App: React.FC = () => {
               onChange={handleUploadFile}
               accept=".pdf,.docx,.md,.txt,.json,.csv,.html"
             />
+          </div>
+        </div>
+      )}
+
+      {/* 访问令牌弹窗（401 时强制出现，验证通过才放行） */}
+      {authOpen && (
+        <div className="modal-mask">
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title">输入访问令牌</div>
+            <div className="modal-message">系统已开启访问鉴权，请输入 API Token 后继续使用。</div>
+            <input
+              ref={tokenInputRef}
+              className="modal-input"
+              type="password"
+              autoFocus
+              placeholder="API Token"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitToken((e.target as HTMLInputElement).value);
+              }}
+            />
+            <div className="modal-actions">
+              <button className="primary" onClick={() => submitToken(tokenInputRef.current?.value ?? "")}>确定</button>
+            </div>
           </div>
         </div>
       )}
