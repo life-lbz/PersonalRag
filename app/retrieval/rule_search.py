@@ -13,8 +13,11 @@ logger = logging.getLogger(__name__)
 _RULE_PATTERN_STRONG = re.compile(r"《(?P<law>[^》]{2,60})》\s*(?:的\s*)?第(?P<art>[一二三四五六七八九十百千零\d]+)条")
 
 
-async def rule_lookup(query: str, kb_id: str):
-    """强模式精确命中：返回 (chunks, law_name)；chunks=None 表示未命中需降级 hybrid。"""
+async def rule_lookup(query: str, kb_ids: str | list[str]):
+    """强模式精确命中：返回 (chunks, law_name)；chunks=None 表示未命中需降级 hybrid。
+
+    kb_ids 支持单库 id 或多库列表（跨库综合问答时用于全库查找同一法条）。
+    """
     from app.db.session import AsyncSessionLocal
     from app.retrieval.retriever import ScoredChunk
 
@@ -22,6 +25,9 @@ async def rule_lookup(query: str, kb_id: str):
     if not m:
         return None, None
     law_name, article_no = m.group("law"), f"第{m.group('art')}条"
+    ids = [kb_ids] if isinstance(kb_ids, str) else list(kb_ids)
+    if not ids:
+        return None, law_name
 
     async with AsyncSessionLocal() as session:
         q = (
@@ -29,7 +35,7 @@ async def rule_lookup(query: str, kb_id: str):
             .join(Document, Document.id == LawArticle.doc_id)
             .join(Chunk, Chunk.doc_id == LawArticle.doc_id)
             .where(
-                Document.kb_id == kb_id,
+                Document.kb_id.in_(ids),
                 LawArticle.law_name == law_name,
                 LawArticle.article_no == article_no,
                 # 只取当前生效版本的法条，避免历史版本重复返回

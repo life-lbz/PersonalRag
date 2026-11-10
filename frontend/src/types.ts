@@ -36,6 +36,9 @@ export interface Citation {
   doc_id?: string;
   doc_title: string;
   page: number | null;
+  rerank_score?: number | null;
+  /** 命中片段摘要（后端截取，供引用卡片展示） */
+  snippet?: string;
 }
 
 export interface ChatMessage {
@@ -48,3 +51,16 @@ export interface ChatMessage {
   logId?: string;
   feedback?: number;
 }
+
+/** 一条会话：本地持久化，id 同时作为后端 session_id。 */
+export interface Session {
+  id: string;
+  title: string;
+  pinned: boolean;
+  kbId: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: ChatMessage[];
+}
+
+export type PageKey = "chat" | "knowledge";

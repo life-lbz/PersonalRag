@@ -151,7 +151,8 @@ async def health():
                       ("rerank", f"{settings.models.rerank.base_url}/health"),
                       ("llm", f"{settings.models.llm.base_url}/models")]:
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
+            # trust_env=False：模型服务走本机回环/SSH 隧道，不能被系统代理劫持
+            async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
                 resp = await client.get(url)
             checks[name] = "ok" if resp.status_code == 200 else f"fail: http {resp.status_code}"
         except Exception as e:

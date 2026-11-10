@@ -19,14 +19,14 @@ _PLAN_PROMPT = (
 )
 
 
-async def plan_and_search(query: str, kb_id: str) -> tuple[list[ScoredChunk], list[str]]:
+async def plan_and_search(query: str, kb_ids: str | list[str]) -> tuple[list[ScoredChunk], list[str]]:
     n = settings.router.planner_max_steps
     result = await llm_json([{"role": "user", "content": _PLAN_PROMPT.format(n=n, query=query)}])
     sub_queries = [str(q).strip() for q in result.get("sub_queries", []) if str(q).strip()][:n]
     if not sub_queries:
         sub_queries = [query]
 
-    tasks = [hybrid_search(sq, kb_id) for sq in sub_queries]
+    tasks = [hybrid_search(sq, kb_ids) for sq in sub_queries]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     seen: set[str] = set()
     merged: list[ScoredChunk] = []

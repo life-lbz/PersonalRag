@@ -31,7 +31,7 @@ _MODE2ROUTE = {
 @dataclass
 class ChatState:
     query: str
-    kb_id: str
+    kb_ids: list[str]            # 单库问答为 [kb_id]；综合问答为全部知识库 id
     session_id: str | None = None
     mode: str = "auto"                     # auto|direct|rule|hybrid|multi_hop
     route: str = ""
@@ -64,7 +64,7 @@ def build_graph():
 
     async def node_rule(state: dict) -> dict:
         s: ChatState = state["s"]
-        hits, _law = await rule_search.rule_lookup(s.query, s.kb_id)
+        hits, _law = await rule_search.rule_lookup(s.query, s.kb_ids)
         if hits:
             s.raw_chunks = list(hits)
             s.used_chunks = hits
@@ -76,7 +76,7 @@ def build_graph():
     async def node_hybrid(state: dict) -> dict:
         s: ChatState = state["s"]
         t0 = time.time()
-        chunks = await hybrid_search(s.query, s.kb_id)
+        chunks = await hybrid_search(s.query, s.kb_ids)
         s.raw_chunks = list(chunks)          # 保存原始命中
         s.used_chunks = chunks
         if chunks:
@@ -97,7 +97,7 @@ def build_graph():
 
     async def node_planner(state: dict) -> dict:
         s: ChatState = state["s"]
-        chunks, sub_queries = await planner.plan_and_search(s.query, s.kb_id)
+        chunks, sub_queries = await planner.plan_and_search(s.query, s.kb_ids)
         s.sub_queries = sub_queries
         s.raw_chunks = list(chunks)
         s.used_chunks = chunks
@@ -177,12 +177,12 @@ def build_graph():
 _compiled = None
 
 
-async def run_retrieval(query: str, kb_id: str, session_id: str | None,
+async def run_retrieval(query: str, kb_ids: list[str], session_id: str | None,
                         mode: str = "auto") -> ChatState:
     global _compiled
     if _compiled is None:
         _compiled = build_graph()
-    state = ChatState(query=query, kb_id=kb_id, session_id=session_id, mode=mode)
+    state = ChatState(query=query, kb_ids=kb_ids, session_id=session_id, mode=mode)
     t0 = time.time()
     result = await _compiled.ainvoke({"s": state})
     s: ChatState = result["s"]

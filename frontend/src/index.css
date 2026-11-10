@@ -1,0 +1,176 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-white text-ink-900 font-sans antialiased;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #d8d8d3 transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: #d8d8d3;
+    border-radius: 999px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* ========== 页面骨架 ========== */
+  .page-header {
+    @apply flex h-14 shrink-0 items-center gap-3 border-b border-hairline bg-white px-6;
+  }
+
+  .page-title {
+    @apply text-[15px] font-semibold tracking-tight text-ink-900;
+  }
+
+  .page-meta {
+    @apply text-[12px] text-ink-500;
+  }
+
+  /* 侧栏分组标题（中文不使用大小写变形与字距） */
+  .group-label {
+    @apply px-1.5 pb-1 text-[11px] font-medium text-ink-500;
+  }
+
+  /* ========== 表单 ========== */
+  .label {
+    @apply mb-1.5 block text-[12px] font-medium text-ink-700;
+  }
+
+  .field {
+    @apply h-9 w-full rounded-control border border-hairline bg-white px-3 text-[13px]
+           text-ink-900 placeholder:text-ink-400 outline-none transition
+           focus:border-brand-400 focus:ring-2 focus:ring-brand-100;
+  }
+
+  .field-invalid {
+    @apply border-red-300 focus:border-red-400 focus:ring-red-100;
+  }
+
+  .hint {
+    @apply text-[12px] leading-relaxed text-ink-500;
+  }
+
+  .error-text {
+    @apply mt-1.5 text-[12px] leading-relaxed text-red-600;
+  }
+
+  /* ========== 按钮：统一 36px 高、8px 圆角、键盘焦点环 ========== */
+  .btn-primary {
+    @apply inline-flex h-9 items-center justify-center gap-1.5 rounded-control bg-brand-600
+           px-3.5 text-[13px] font-medium text-white transition hover:bg-brand-700
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-200
+           disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-ghost {
+    @apply inline-flex h-9 items-center justify-center gap-1.5 rounded-control px-3 text-[13px]
+           font-medium text-ink-700 transition hover:bg-black/[0.05]
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/10
+           disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-outline {
+    @apply inline-flex h-9 items-center justify-center gap-1.5 rounded-control border
+           border-hairline bg-white px-3.5 text-[13px] font-medium text-ink-700 transition
+           hover:border-brand-300 hover:text-brand-700 focus-visible:outline-none
+           focus-visible:ring-2 focus-visible:ring-brand-100 disabled:opacity-40;
+  }
+
+  .btn-danger {
+    @apply inline-flex h-9 items-center justify-center gap-1.5 rounded-control bg-red-600
+           px-3.5 text-[13px] font-medium text-white transition hover:bg-red-700
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-200
+           disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-sm {
+    @apply h-8 px-2.5 text-[12px];
+  }
+
+  .btn-icon {
+    @apply h-8 w-8 px-0;
+  }
+
+  /* ========== 数据表格 ========== */
+  .data-table {
+    @apply w-full border-separate border-spacing-0 text-left text-[13px];
+  }
+
+  .data-table thead th {
+    @apply sticky top-0 z-10 whitespace-nowrap border-b border-hairline bg-canvas-soft
+           px-4 py-2.5 text-[12px] font-medium text-ink-500;
+  }
+
+  .data-table tbody td {
+    @apply border-b border-hairline px-4 py-3 align-middle text-ink-700;
+  }
+
+  .data-table tbody tr {
+    @apply transition-colors hover:bg-canvas-soft;
+  }
+
+  .data-table tbody tr:last-child td {
+    @apply border-b-0;
+  }
+
+  /* 数值列右对齐并启用等宽数字 */
+  .data-table .col-num {
+    @apply text-right tabular-nums text-ink-600;
+  }
+
+  .data-table .col-actions {
+    @apply whitespace-nowrap text-right;
+  }
+
+  /* ========== 状态徽章 ========== */
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px]
+           font-medium leading-5 ring-1 ring-inset;
+  }
+
+  .badge-success {
+    @apply bg-brand-50 text-brand-700 ring-brand-100;
+  }
+
+  .badge-warning {
+    @apply bg-amber-50 text-amber-700 ring-amber-100;
+  }
+
+  .badge-danger {
+    @apply bg-red-50 text-red-600 ring-red-100;
+  }
+
+  .badge-neutral {
+    @apply bg-canvas text-ink-500 ring-hairline;
+  }
+
+  /* ========== 容器与空态 ========== */
+  .card {
+    @apply rounded-card border border-hairline bg-white;
+  }
+
+  .empty-state {
+    @apply flex flex-col items-center justify-center px-6 py-12 text-center;
+  }
+}

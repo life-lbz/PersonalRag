@@ -21,7 +21,7 @@ class SearchRequest(BaseModel):
 async def search(body: SearchRequest, session: AsyncSession = Depends(get_async_session)):
     from app.retrieval.retriever import hybrid_search
 
-    chunks = await hybrid_search(body.query, body.kb_id, top_k=body.top_k)
+    chunks = await hybrid_search(body.query, [body.kb_id], top_k=body.top_k)
     return [{
         "chunk_id": c.chunk_id, "doc_id": c.doc_id, "doc_title": c.doc_title,
         "score": round(c.score, 4), "cosine": round(c.cosine, 4),

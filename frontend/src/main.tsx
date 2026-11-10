@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
-import "./App.css";
+import "./index.css";
 
 /** H5: 顶层错误边界，单个组件渲染异常不再导致整页白屏。 */
 class ErrorBoundary extends React.Component<

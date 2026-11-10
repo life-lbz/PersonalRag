@@ -15,11 +15,21 @@ from app.config import settings
 from app.clients.redis_client import cache_get_json, cache_set_json
 
 
+def _client(timeout: float) -> httpx.AsyncClient:
+    """模型服务均为本机回环（SSH 隧道转发）。
+
+    trust_env=False：忽略 HTTP_PROXY/HTTPS_PROXY，避免系统代理把 127.0.0.1 请求
+    转发出去（代理侧会返回 502 Bad Gateway）。
+    """
+    return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+
+
 # ---------- embedding ----------
 async def embed_texts(texts: list[str]) -> tuple[list[list[float]], list[dict]]:
     """返回 (dense_vecs, sparse_vecs)。sparse 为 {token_id_str: weight} dict。"""
     cfg = settings.models.embedding
-    async with httpx.AsyncClient(timeout=cfg.timeout) as client:
+    async with _client(cfg.timeout) as client:
         resp = await client.post(
             f"{cfg.base_url}/v1/embeddings", json={"texts": texts}, headers={"X-Model": cfg.model}
         )
@@ -45,7 +55,7 @@ async def rerank(query: str, documents: list[str]) -> list[float]:
     cfg = settings.models.rerank
     scores: list[float] = []
     batch = cfg.batch_size
-    async with httpx.AsyncClient(timeout=cfg.timeout) as client:
+    async with _client(cfg.timeout) as client:
         for i in range(0, len(documents), batch):
             resp = await client.post(
                 f"{cfg.base_url}/v1/rerank",
@@ -60,7 +70,12 @@ async def rerank(query: str, documents: list[str]) -> list[float]:
 def get_llm_client() -> AsyncOpenAI:
     cfg = settings.models.llm
     # vLLM 未启用 --api-key 时不校验该值, 此处仅为 OpenAI SDK 的必填占位
-    return AsyncOpenAI(base_url=cfg.base_url, api_key="EMPTY", timeout=cfg.timeout)
+    return AsyncOpenAI(
+        base_url=cfg.base_url,
+        api_key="EMPTY",
+        timeout=cfg.timeout,
+        http_client=httpx.AsyncClient(timeout=cfg.timeout, trust_env=False),
+    )
 
 
 async def llm_chat(messages: list[dict], stream: bool = False, **kwargs) -> Any:

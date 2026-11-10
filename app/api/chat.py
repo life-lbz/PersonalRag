@@ -17,6 +17,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -31,7 +32,7 @@ router = APIRouter(prefix="/api/v1", tags=["chat"])
 
 
 class ChatRequest(BaseModel):
-    kb_id: str
+    kb_id: str | None = None  # 缺省=全部知识库（综合问答），指定时只检索该库
     query: str
     session_id: str | None = None
     mode: str = "auto"  # auto|direct|rule|hybrid|multi_hop
@@ -46,15 +47,19 @@ async def chat_completions(body: ChatRequest, request: Request,
                            session: AsyncSession = Depends(get_async_session)):
     from app.models.entities import KnowledgeBase
 
-    # C5: KB 存在性校验（快速失败，不入流）
-    if not body.kb_id:
-        raise HTTPException(400, "缺少 kb_id")
+    # C5: KB 存在性校验（快速失败，不入流）；未指定 kb_id 时按全部知识库检索
     if body.query and len(body.query.strip()) > 2000:
         raise HTTPException(400, "query 过长（上限 2000 字）")
     if body.mode not in ("auto", "direct", "rule", "hybrid", "multi_hop"):
         raise HTTPException(400, f"无效 mode: {body.mode}")
-    if await session.get(KnowledgeBase, body.kb_id) is None:
-        raise HTTPException(404, "知识库不存在或已删除")
+    if body.kb_id:
+        if await session.get(KnowledgeBase, body.kb_id) is None:
+            raise HTTPException(404, "知识库不存在或已删除")
+        kb_ids = [body.kb_id]
+    else:
+        kb_ids = list((await session.execute(select(KnowledgeBase.id))).scalars().all())
+        if not kb_ids:
+            raise HTTPException(400, "暂无知识库，请先创建知识库并上传文档")
 
     session_id = body.session_id or str(uuid.uuid4())
     log_id = str(uuid.uuid4())
@@ -64,7 +69,7 @@ async def chat_completions(body: ChatRequest, request: Request,
         t0 = time.time()
         answer_parts: list[str] = []
         try:
-            state = await run_retrieval(body.query, body.kb_id, session_id, body.mode)
+            state = await run_retrieval(body.query, kb_ids, session_id, body.mode)
             yield _sse({"route": state.route, "session_id": session_id, "log_id": log_id,
                         "request_id": request_id})
 

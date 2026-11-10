@@ -95,9 +95,10 @@ export interface ChatStreamHandlers {
   onError: (code: string, message: string) => void;
 }
 
-/** SSE 问答（POST + fetch 流式读取 getReader, 真正增量到达即回调）。 */
+/** SSE 问答（POST + fetch 流式读取 getReader, 真正增量到达即回调）。
+ *  kbId 传 null 表示「全部知识库」综合问答。 */
 export async function chatStream(
-  kbId: string,
+  kbId: string | null,
   query: string,
   sessionId: string,
   mode: string,

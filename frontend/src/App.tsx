@@ -12,77 +12,106 @@ import {
   UnauthorizedError,
   uploadDoc,
 } from "./api";
-import type { ChatMessage, DocumentItem, KnowledgeBase } from "./types";
+import { deriveTitle, loadSessions, newSession, saveSessions } from "./sessions";
+import type { ChatMessage, DocumentItem, KnowledgeBase, PageKey, Session } from "./types";
+import ChatPage from "./components/ChatPage";
+import KnowledgePage from "./components/KnowledgePage";
+import Sidebar from "./components/Sidebar";
+import { ConfirmDialog, ModalShell, PromptDialog, Toast } from "./components/Modal";
+import { IconUpload } from "./components/Icons";
 
 /** 开发环境才输出错误日志，生产不把细节打到 console（L2）。 */
 const logError = (...args: unknown[]) => {
-  if (import.meta.env.DEV) {
-    console.error(...args);
-  }
+  if (import.meta.env.DEV) console.error(...args);
 };
 
+// 名称校验（与后端规则保持一致）
+const validateName = (name: string): string | null => {
+  const trimmed = name.trim();
+  if (!trimmed) return "名称不能为空";
+  if (trimmed.length < 2) return "名称至少 2 个字符";
+  if (trimmed.length > 50) return "名称最多 50 个字符";
+  const bad = "?*\\/:;'\"<>|#$%&@+=~`!^[]{}()";
+  for (const ch of trimmed) {
+    if (bad.includes(ch)) return `名称不能包含非法字符: ${ch}`;
+  }
+  if (!/^[\u4e00-\u9fa5A-Za-z0-9_\-]+$/.test(trimmed)) {
+    return "名称只能包含中文、英文、数字、下划线(_)、短横线(-)";
+  }
+  return null;
+};
+
+type Dialog =
+  | { kind: "none" }
+  | { kind: "create-kb" }
+  | { kind: "rename-kb"; id: string; name: string }
+  | { kind: "delete-doc"; id: string; title: string }
+  | { kind: "upload" }
+  | { kind: "token" };
+
 const App: React.FC = () => {
+  // ---- 数据 ----
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
-  const [kbId, setKbId] = useState<string>("");
+  const [kbId, setKbId] = useState("");
   const [docs, setDocs] = useState<DocumentItem[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
+
+  // ---- 会话 ----
+  const [sessions, setSessions] = useState<Session[]>(() => loadSessions());
+  const [activeId, setActiveId] = useState<string>(() => loadSessions()[0]?.id ?? "");
+  const [page, setPage] = useState<PageKey>("chat");
   const [streaming, setStreaming] = useState(false);
-  const [authOpen, setAuthOpen] = useState(false); // 401 时弹出令牌输入
-  const [sessionId] = useState(() => crypto.randomUUID());
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const uploadInputRef = useRef<HTMLInputElement>(null);
+
+  // ---- UI ----
+  const [dialog, setDialog] = useState<Dialog>({ kind: "none" });
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [uploadPolicy, setUploadPolicy] = useState<"replace" | "coexist">("replace");
   const tokenInputRef = useRef<HTMLInputElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
 
-  // Modal 状态（替换 prompt/confirm）
-  const [modal, setModal] = useState<{
-    open: boolean;
-    title: string;
-    type: "input" | "confirm";
-    message?: string;
-    inputValue?: string;
-    inputPlaceholder?: string;
-    confirmText?: string;
-    danger?: boolean;
-    onConfirm: (val?: string) => void;
-  }>({ open: false, title: "", type: "confirm", onConfirm: () => {} });
+  const showToast = useCallback((text: string) => {
+    setToast(text);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 1800);
+  }, []);
 
-  const closeModal = () => setModal((m) => ({ ...m, open: false }));
+  const activeSession = sessions.find((s) => s.id === activeId);
+  // 知识库页 / 文档操作必须落到某个具体库：未选（即「全部知识库」）时回落到第一个
+  const kbTargetId = kbId || kbs[0]?.id || "";
 
-  // 上传 Modal 状态
-  const [uploadModal, setUploadModal] = useState<{
-    open: boolean;
-    policy: "replace" | "coexist";
-  }>({ open: false, policy: "replace" });
+  // ---- 会话持久化（防抖，避免流式期间高频写盘）----
+  useEffect(() => {
+    const t = window.setTimeout(() => saveSessions(sessions), 300);
+    return () => window.clearTimeout(t);
+  }, [sessions]);
+
+  const patchSession = useCallback((id: string, patch: (s: Session) => Partial<Session>) => {
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, ...patch(s), updatedAt: Date.now() } : s)),
+    );
+  }, []);
+
+  // ---- 数据加载 ----
+  const catchAuth = useCallback((e: unknown) => {
+    if (e instanceof UnauthorizedError) setTokenOpen(true);
+    else logError(e);
+  }, []);
 
   const refreshKBs = useCallback(async () => {
     const list = await listKBs();
     setKbs(list);
-    if (list.length > 0) setKbId((prev) => prev || list[0].id);
+    // 默认停在「全部知识库」；仅当原先选中的库已不存在时归零
+    setKbId((prev) => (prev && list.some((k) => k.id === prev) ? prev : ""));
   }, []);
 
   const refreshDocs = useCallback(async () => {
-    if (!kbId) return;
-    setDocs(await listDocs(kbId));
-  }, [kbId]);
-
-  // 统一处理：401 → 弹出令牌输入；其余错误仅记录
-  const catchAuth = useCallback((e: unknown) => {
-    if (e instanceof UnauthorizedError) setAuthOpen(true);
-    else logError(e);
-  }, []);
-
-  const submitToken = useCallback(async (val: string) => {
-    if (!val.trim()) return;
-    setToken(val);
-    try {
-      await refreshKBs();
-      setAuthOpen(false);
-    } catch (e) {
-      if (e instanceof UnauthorizedError) alert("令牌无效，请重新输入");
-      else { setAuthOpen(false); logError(e); }
+    if (!kbTargetId) {
+      setDocs([]);
+      return;
     }
-  }, [refreshKBs]);
+    setDocs(await listDocs(kbTargetId));
+  }, [kbTargetId]);
 
   useEffect(() => {
     refreshKBs().catch(catchAuth);
@@ -92,419 +121,422 @@ const App: React.FC = () => {
     refreshDocs().catch(catchAuth);
   }, [refreshDocs, catchAuth]);
 
-  // 轮询入库/删除状态（有 processing/deleting 文档时）：一次列表请求刷新全部，避免按文档逐个请求（M3）
+  // 切换会话时同步该会话绑定的知识库（空字符串 = 全部知识库）
   useEffect(() => {
-    const hasPending = docs.some((d) => d.status === "processing" || d.status === "deleting");
-    if (!hasPending) return;
-    // 删除任务通常较快，用更短的间隔（1.5s）；入库较慢用 3s
+    if (!activeSession) return;
+    setKbId(activeSession.kbId ?? "");
+  }, [activeSession?.id, activeSession?.kbId]);
+
+  // 轮询入库/删除状态（一次列表请求刷新全部）
+  useEffect(() => {
+    const pending = docs.some((d) => d.status === "processing" || d.status === "deleting");
+    if (!pending) return;
     const hasDeleting = docs.some((d) => d.status === "deleting");
-    const interval = hasDeleting ? 1500 : 3000;
-    const timer = setInterval(() => {
-      refreshDocs().catch(catchAuth);
-    }, interval);
-    return () => clearInterval(timer);
+    const timer = window.setInterval(() => refreshDocs().catch(catchAuth), hasDeleting ? 1500 : 3000);
+    return () => window.clearInterval(timer);
   }, [docs, refreshDocs, catchAuth]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
   const notifyError = (action: string, e: unknown) => {
-    if (e instanceof UnauthorizedError) { setAuthOpen(true); return; }
-    alert(`${action}失败: ${e instanceof Error ? e.message : String(e)}`);
-  };
-
-  // 前端名称校验（和后端规则保持一致）
-  const validateName = (name: string): string | null => {
-    const trimmed = name.trim();
-    if (!trimmed) return "名称不能为空";
-    if (trimmed.length < 2) return "名称至少 2 个字符";
-    if (trimmed.length > 50) return "名称最多 50 个字符";
-    const bad = "?*\\/:;'\"<>|#$%&@+=~`!^[]{}()";
-    for (const ch of trimmed) {
-      if (bad.includes(ch)) return `名称不能包含非法字符: ${ch}`;
+    if (e instanceof UnauthorizedError) {
+      setTokenOpen(true);
+      return;
     }
-    if (!/^[\u4e00-\u9fa5A-Za-z0-9_\-]+$/.test(trimmed)) {
-      return "名称只能包含中文、英文、数字、下划线(_)、短横线(-)";
+    showToast(`${action}失败：${e instanceof Error ? e.message : String(e)}`);
+  };
+
+  // ---- 令牌 ----
+  const submitToken = async (val: string) => {
+    if (!val.trim()) return;
+    setToken(val);
+    try {
+      await refreshKBs();
+      setTokenOpen(false);
+      showToast("令牌已保存");
+    } catch (e) {
+      if (e instanceof UnauthorizedError) showToast("令牌无效，请重新输入");
+      else setTokenOpen(false);
     }
-    return null;
   };
 
-  const handleCreateKB = () => {
-    setModal({
-      open: true,
-      title: "新建知识库",
-      type: "input",
-      inputPlaceholder: "请输入知识库名称（2-50 字符）",
-      confirmText: "创建",
-      onConfirm: async (val) => {
-        const name = val?.trim() ?? "";
-        const err = validateName(name);
-        if (err) { alert(err); return; }
-        closeModal();
-        try {
-          const kb = await createKB(name);
-          await refreshKBs();
-          setKbId(kb.id);
-        } catch (e) {
-          notifyError("新建知识库", e);
-        }
-      },
-    });
+  // ---- 知识库 ----
+  const handleCreateKB = () => setDialog({ kind: "create-kb" });
+  const handleRenameKB = (id: string, name: string) => setDialog({ kind: "rename-kb", id, name });
+
+  const handleSelectKb = (id: string) => {
+    setKbId(id);
+    if (activeSession) patchSession(activeSession.id, () => ({ kbId: id }));
   };
 
-  const handleRenameKB = (id: string, currentName: string) => {
-    setModal({
-      open: true,
-      title: "重命名知识库",
-      type: "input",
-      inputValue: currentName,
-      confirmText: "保存",
-      onConfirm: async (val) => {
-        const name = val?.trim() ?? "";
-        const err = validateName(name);
-        if (err) { alert(err); return; }
-        if (name === currentName) { closeModal(); return; }
-        closeModal();
-        try {
-          await renameKB(id, name);
-          await refreshKBs();
-        } catch (e) {
-          notifyError("重命名知识库", e);
-        }
-      },
-    });
-  };
-
-  // 打开上传 Modal（选版本策略）
+  // ---- 文档 ----
   const openUpload = () => {
-    if (!kbId) { alert("请先选择知识库"); return; }
-    setUploadModal({ open: true, policy: "replace" });
+    if (!kbTargetId) {
+      showToast("请先创建或选择知识库");
+      return;
+    }
+    setUploadPolicy("replace");
+    setDialog({ kind: "upload" });
   };
 
-  const closeUpload = () => setUploadModal((u) => ({ ...u, open: false }));
-
-  // Modal 里选完策略后 → 触发 Modal 内的 file input（Modal 关闭时该 input 已卸载，H4）
-  const handleUploadConfirm = () => uploadInputRef.current?.click();
-
-  // 选完文件 → 真正上传
   const handleUploadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    e.target.value = "";  // 先重置，允许再次选择同一文件
+    e.target.value = "";
     if (!file) return;
-    const policy = uploadModal.policy;
-    closeUpload();
+    setDialog({ kind: "none" });
     try {
-      await uploadDoc(kbId, file, policy);
+      await uploadDoc(kbTargetId, file, uploadPolicy);
       await refreshDocs();
+      showToast(`已提交入库：${file.name}`);
     } catch (err) {
       notifyError("上传文档", err);
     }
   };
 
-  const handleDeleteDoc = (id: string) => {
-    setModal({
-      open: true,
-      title: "确认删除",
-      type: "confirm",
-      message: "确认删除该文档（级联删除全部版本和向量）？此操作不可撤销。",
-      confirmText: "删除",
-      danger: true,
-      onConfirm: async () => {
-        closeModal();
-        try {
-          await deleteDoc(id);
-          await refreshDocs();
-        } catch (e) {
-          notifyError("删除文档", e);
-        }
-      },
-    });
-  };
+  const handleDeleteDoc = (id: string, title: string) =>
+    setDialog({ kind: "delete-doc", id, title });
 
   const handleRollback = async (id: string, version: number) => {
     try {
       await rollbackDoc(id, version);
       await refreshDocs();
+      showToast(`已回滚到 v${version}`);
     } catch (e) {
       notifyError("版本回滚", e);
     }
   };
 
-  const handleSend = async () => {
-    const query = input.trim();
-    if (!query || !kbId || streaming) return;
-    setInput("");
-    setStreaming(true);
-    setMessages((m) => [...m, { role: "user", content: query }, { role: "assistant", content: "" }]);
-
-    let logId = "";
-    const updateLast = (patch: Partial<ChatMessage>) => {
-      setMessages((m) => {
-        const next = [...m];
-        next[next.length - 1] = { ...next[next.length - 1], ...patch };
-        return next;
-      });
-    };
-
-    let acc = "";
-    try {
-      await chatStream(kbId, query, sessionId, "auto", {
-        onDelta: (t) => {
-          acc += t;
-          updateLast({ content: acc });
-        },
-        onMeta: (route, id) => {
-          logId = id;
-          updateLast({ route });
-        },
-        onCitations: (citations) => updateLast({ citations }),
-        onDone: (route, latency) => updateLast({ route: route || undefined, latency_ms: latency, logId: logId || undefined }),
-        onError: (code, message) => updateLast({ error: `${code}: ${message}` }),
-      });
-    } catch (e) {
-      if (e instanceof UnauthorizedError) setAuthOpen(true);
-      updateLast({ error: e instanceof UnauthorizedError ? "访问令牌缺失或无效" : String(e) });
-    } finally {
-      setStreaming(false);
+  // ---- 会话 ----
+  const handleNewSession = () => {
+    const empty = sessions.find((s) => s.messages.length === 0);
+    if (empty) {
+      setActiveId(empty.id);
+      return;
     }
+    const s = newSession(kbId);
+    setSessions((prev) => [s, ...prev]);
+    setActiveId(s.id);
+  };
+
+  const handleDeleteSession = (id: string) => {
+    setSessions((prev) => prev.filter((s) => s.id !== id));
+    if (id === activeId) setActiveId("");
+  };
+
+  // ---- 对话 ----
+  const runChat = useCallback(
+    async (sid: string, query: string) => {
+      setStreaming(true);
+      let logId = "";
+      const updateLast = (patch: Partial<ChatMessage>) =>
+        patchSession(sid, (s) => {
+          const msgs = [...s.messages];
+          msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], ...patch };
+          return { messages: msgs };
+        });
+
+      // 用会话绑定的知识库（空字符串 = 全部知识库），避免切换后错乱
+      const boundKb = sessions.find((s) => s.id === sid)?.kbId;
+      const sessionKb = boundKb ?? kbId;
+      let acc = "";
+      try {
+        await chatStream(sessionKb || null, query, sid, "auto", {
+          onDelta: (t) => {
+            acc += t;
+            updateLast({ content: acc });
+          },
+          onMeta: (route, id) => {
+            logId = id;
+            updateLast({ route });
+          },
+          onCitations: (citations) => updateLast({ citations }),
+          onDone: (route, latency) =>
+            updateLast({ route: route || undefined, latency_ms: latency, logId: logId || undefined }),
+          onError: (code, message) => updateLast({ error: `${code}: ${message}` }),
+        });
+      } catch (e) {
+        if (e instanceof UnauthorizedError) setTokenOpen(true);
+        updateLast({ error: e instanceof UnauthorizedError ? "访问令牌缺失或无效" : String(e) });
+      } finally {
+        setStreaming(false);
+      }
+    },
+    [kbId, kbs.length, patchSession, sessions],
+  );
+
+  const handleSend = (query: string) => {
+    if (streaming || kbs.length === 0) return;
+    const sid = activeId || "";
+    const target = sessions.find((s) => s.id === sid);
+
+    if (!target) {
+      const s = newSession(kbId);
+      setSessions((prev) => [
+        {
+          ...s,
+          title: deriveTitle(query),
+          messages: [
+            { role: "user", content: query },
+            { role: "assistant", content: "" },
+          ],
+        },
+        ...prev,
+      ]);
+      setActiveId(s.id);
+      void runChat(s.id, query);
+      return;
+    }
+
+    patchSession(sid, (s) => ({
+      title: s.messages.length === 0 ? deriveTitle(query) : s.title,
+      kbId,
+      messages: [
+        ...s.messages,
+        { role: "user", content: query },
+        { role: "assistant", content: "" },
+      ],
+    }));
+    void runChat(sid, query);
+  };
+
+  const handleRegenerate = (idx: number) => {
+    if (streaming || !activeSession) return;
+    const msgs = activeSession.messages;
+    let q = "";
+    for (let i = idx - 1; i >= 0; i--) {
+      if (msgs[i].role === "user") {
+        q = msgs[i].content;
+        break;
+      }
+    }
+    if (!q) return;
+    const sid = activeSession.id;
+    patchSession(sid, (s) => ({ messages: s.messages.slice(0, idx - 1) }));
+    patchSession(sid, (s) => ({
+      messages: [...s.messages, { role: "user", content: q }, { role: "assistant", content: "" }],
+    }));
+    void runChat(sid, q);
   };
 
   const handleFeedback = async (idx: number, fb: number) => {
-    const msg = messages[idx];
-    if (!msg?.logId) return;
-    await sendFeedback(msg.logId, fb);
-    setMessages((m) => {
-      const next = [...m];
-      next[idx] = { ...next[idx], feedback: fb };
-      return next;
-    });
-  };
-
-  const statusLabel: Record<string, string> = {
-    processing: "入库中", active: "正常", deleting: "删除中", failed: "失败",
-  };
-  const versionLabel: Record<string, string> = {
-    processing: "处理中", active: "生效中", archived: "已归档", superseded: "已更替",
+    const msg = activeSession?.messages[idx];
+    if (!msg?.logId || !activeSession) return;
+    try {
+      await sendFeedback(msg.logId, fb);
+      patchSession(activeSession.id, (s) => {
+        const msgs = [...s.messages];
+        msgs[idx] = { ...msgs[idx], feedback: fb };
+        return { messages: msgs };
+      });
+    } catch (e) {
+      notifyError("提交反馈", e);
+    }
   };
 
   return (
-    <div className="layout">
-      <aside className="sidebar">
-        <div className="panel">
-          <div className="panel-head">
-            <h2>知识库</h2>
-            <button onClick={handleCreateKB}>+ 新建</button>
-          </div>
-          <div className="kb-list">
-            {kbs.map((k) => (
-              <button
-                key={k.id}
-                className={`kb-item ${k.id === kbId ? "active" : ""}`}
-                onClick={() => { setKbId(k.id); setMessages([]); }}
-                onDoubleClick={(e) => { e.stopPropagation(); handleRenameKB(k.id, k.name); }}
-                title="点击切换 · 双击重命名"
-              >
-                <span className="kb-name">{k.name}</span>
-                <span className="kb-edit" onClick={(e) => { e.stopPropagation(); handleRenameKB(k.id, k.name); }}
-                      title="重命名">✎</span>
-              </button>
-            ))}
-            {kbs.length === 0 && <div className="empty">暂无知识库</div>}
-          </div>
-        </div>
-        <div className="panel grow">
-          <div className="panel-head">
-            <h2>文档</h2>
-            <label className="upload-btn" onClick={openUpload}>
-              + 上传
-            </label>
-          </div>
-          <div className="doc-list">
-            {docs.map((d) => (
-              <div key={d.id} className="doc-item">
-                <div className="doc-title" title={d.title}>
-                  {d.title}
-                  <span className={`tag tag-${d.status}`}>{statusLabel[d.status] ?? d.status}</span>
-                </div>
-                <div className="doc-meta">
-                  {d.doc_type} · v{d.current_version} · {d.chunk_count ?? "-"} 块 · {d.version_policy === "coexist" ? "并存式" : "覆盖式"}
-                </div>
-                <div className="doc-actions">
-                  {d.versions.filter((v) => v.status !== "active").map((v) => (
-                    <button key={v.version} className="mini"
-                      onClick={() => handleRollback(d.id, v.version)}
-                      title={`${versionLabel[v.status] ?? v.status}, 点击回滚`}>
-                      回滚到 v{v.version}
-                    </button>
-                  ))}
-                  <button className="mini danger" onClick={() => handleDeleteDoc(d.id)}>删除</button>
-                </div>
-              </div>
-            ))}
-            {docs.length === 0 && <div className="empty">暂无文档, 点击上传</div>}
-          </div>
-        </div>
-      </aside>
+    <div className="flex h-full">
+      <Sidebar
+        sessions={sessions}
+        activeId={activeId}
+        page={page}
+        kbLabel={kbId ? (kbs.find((k) => k.id === kbId)?.name ?? "") : kbs.length ? "全部" : ""}
+        kbNames={kbs.map((k) => k.name)}
+        onNew={handleNewSession}
+        onSelect={setActiveId}
+        onGoKnowledge={() => setPage("knowledge")}
+        onGoChat={() => setPage("chat")}
+        onTogglePin={(id) =>
+          patchSession(id, (s) => ({ pinned: !s.pinned }))
+        }
+        onDelete={handleDeleteSession}
+      />
 
-      <main className="chat">
-        <header className="chat-head">
-          <h1>PersonalRag 知识问答</h1>
-          <span className="hint">答案基于知识库检索结果生成, 引用 [n] 可溯源</span>
-        </header>
-        <div className="messages">
-          {messages.length === 0 && (
-            <div className="welcome">
-              <h2>开始提问</h2>
-              <p>左侧选择知识库并上传文档, 然后在此提问。支持闲聊直答 / 精确条文 / 混合检索 / 多跳推理。</p>
-            </div>
-          )}
-          {messages.map((m, i) => (
-            <div key={i} className={`msg ${m.role}`}>
-              <div className="bubble">
-                {m.route && m.role === "assistant" && (
-                  <div className="msg-route">通道: {m.route}{m.latency_ms ? ` · ${m.latency_ms}ms` : ""}</div>
-                )}
-                <div className="msg-content">{m.content || (streaming ? "…" : "")}</div>
-                {m.citations && m.citations.length > 0 && (
-                  <div className="citations">
-                    {m.citations.map((c) => (
-                      <span key={c.n} className="citation" title={`${c.doc_title}${c.page ? ` 第${c.page}页` : ""}`}>
-                        [{c.n}] {c.doc_title}{c.page ? ` p${c.page}` : ""}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {m.error && <div className="msg-error">{m.error}</div>}
-                {m.logId && m.role === "assistant" && (
-                  <div className="feedback">
-                    <button className={m.feedback === 1 ? "picked" : ""}
-                      onClick={() => handleFeedback(i, 1)}>👍</button>
-                    <button className={m.feedback === -1 ? "picked" : ""}
-                      onClick={() => handleFeedback(i, -1)}>👎</button>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-          <div ref={bottomRef} />
-        </div>
-        <footer className="composer">
-          <textarea
-            value={input}
-            placeholder={kbId ? "输入问题, Enter 发送" : "请先创建/选择知识库"}
-            disabled={!kbId || streaming}
-            onChange={(e) => setInput(e.target.value)}
+      {page === "chat" ? (
+        <ChatPage
+          kbs={kbs}
+          kbId={kbId}
+          messages={activeSession?.messages ?? []}
+          streaming={streaming}
+          onKbChange={handleSelectKb}
+          onSend={handleSend}
+          onRegenerate={handleRegenerate}
+          onFeedback={handleFeedback}
+          onToast={showToast}
+        />
+      ) : (
+        <KnowledgePage
+          kbs={kbs}
+          kbId={kbTargetId}
+          docs={docs}
+          onSelectKb={handleSelectKb}
+          onCreateKb={handleCreateKB}
+          onRenameKb={handleRenameKB}
+          onUpload={openUpload}
+          onDeleteDoc={handleDeleteDoc}
+          onRollback={handleRollback}
+          onBack={() => setPage("chat")}
+        />
+      )}
+
+      {/* 新建知识库 */}
+      {dialog.kind === "create-kb" && (
+        <PromptDialog
+          title="新建知识库"
+          placeholder="请输入知识库名称（2-50 字符）"
+          confirmText="创建"
+          validate={validateName}
+          onClose={() => setDialog({ kind: "none" })}
+          onConfirm={async (name) => {
+            try {
+              const kb = await createKB(name);
+              await refreshKBs();
+              setKbId(kb.id);
+              setDialog({ kind: "none" });
+              showToast(`已创建：${name}`);
+            } catch (e) {
+              notifyError("新建知识库", e);
+            }
+          }}
+        />
+      )}
+
+      {/* 重命名知识库 */}
+      {dialog.kind === "rename-kb" && (
+        <PromptDialog
+          title="重命名知识库"
+          defaultValue={dialog.name}
+          confirmText="保存"
+          validate={validateName}
+          onClose={() => setDialog({ kind: "none" })}
+          onConfirm={async (name) => {
+            if (name === dialog.name) {
+              setDialog({ kind: "none" });
+              return;
+            }
+            try {
+              await renameKB(dialog.id, name);
+              await refreshKBs();
+              setDialog({ kind: "none" });
+              showToast("已重命名");
+            } catch (e) {
+              notifyError("重命名知识库", e);
+            }
+          }}
+        />
+      )}
+
+      {/* 删除文档 */}
+      {dialog.kind === "delete-doc" && (
+        <ConfirmDialog
+          title="确认删除"
+          message={`确认删除「${dialog.title}」？将级联删除全部版本与向量，操作不可撤销。`}
+          confirmText="删除"
+          danger
+          onClose={() => setDialog({ kind: "none" })}
+          onConfirm={async () => {
+            try {
+              await deleteDoc(dialog.id);
+              await refreshDocs();
+              setDialog({ kind: "none" });
+              showToast("已删除");
+            } catch (e) {
+              notifyError("删除文档", e);
+            }
+          }}
+        />
+      )}
+
+      {/* 上传：先选版本策略 */}
+      {dialog.kind === "upload" && (
+        <ModalShell
+          title="上传文档"
+          onClose={() => setDialog({ kind: "none" })}
+          footer={
+            <>
+              <button className="btn-ghost" onClick={() => setDialog({ kind: "none" })}>
+                取消
+              </button>
+              <button className="btn-primary" onClick={() => uploadInputRef.current?.click()}>
+                <IconUpload size={14} />
+                选择文件…
+              </button>
+            </>
+          }
+        >
+          <p className="mb-3 leading-relaxed">
+            同名文件重复上传时，版本策略决定新旧版本的共存方式：
+          </p>
+          <div className="space-y-2">
+            {(
+              [
+                ["replace", "覆盖式", "新版生效，旧版本标记归档并在保留窗口后清理（推荐）"],
+                ["coexist", "并存式", "所有版本均可被检索到，适合法规 / 合同类时效文献"],
+              ] as const
+            ).map(([val, label, desc]) => (
+              <label
+                key={val}
+                onClick={() => setUploadPolicy(val)}
+                className={`flex cursor-pointer gap-3 rounded-card border p-3 transition ${
+                  uploadPolicy === val
+                    ? "border-brand-400 bg-brand-50/60"
+                    : "border-hairline hover:border-brand-200"
+                }`}
+              >
+                <span
+                  className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                    uploadPolicy === val ? "border-brand-600" : "border-ink-400/50"
+                  }`}
+                >
+                  {uploadPolicy === val && <span className="h-2 w-2 rounded-full bg-brand-600" />}
+                </span>
+                <span>
+                  <span className="block text-[13px] font-medium text-ink-900">{label}</span>
+                  <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-500">
+                    {desc}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </div>
+          <input
+            ref={uploadInputRef}
+            type="file"
+            hidden
+            onChange={handleUploadFile}
+            accept=".pdf,.docx,.md,.txt,.json,.csv,.html,.xlsx,.pptx,.eml"
+          />
+        </ModalShell>
+      )}
+
+      {/* 访问令牌 */}
+      {tokenOpen && (
+        <ModalShell
+          title="输入访问令牌"
+          closable={false}
+          footer={
+            <button
+              className="btn-primary"
+              onClick={() => submitToken(tokenInputRef.current?.value ?? "")}
+            >
+              确定
+            </button>
+          }
+        >
+          <p className="mb-3 leading-relaxed">
+            系统已开启访问鉴权，请输入 API Token 后继续使用。令牌会保存在本浏览器。
+          </p>
+          <input
+            ref={tokenInputRef}
+            className="field"
+            type="password"
+            autoFocus
+            placeholder="API Token"
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+              if (e.key === "Enter") submitToken((e.target as HTMLInputElement).value);
             }}
           />
-          <button onClick={handleSend} disabled={!kbId || streaming || !input.trim()}>发送</button>
-        </footer>
-      </main>
-
-      {/* Modal（替换原生 prompt/confirm） */}
-      {modal.open && (
-        <div className="modal-mask" onClick={closeModal}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">{modal.title}</div>
-            {modal.message && <div className="modal-message">{modal.message}</div>}
-            {modal.type === "input" && (
-              <input
-                className="modal-input"
-                autoFocus
-                defaultValue={modal.inputValue ?? ""}
-                placeholder={modal.inputPlaceholder}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") modal.onConfirm((e.target as HTMLInputElement).value);
-                  if (e.key === "Escape") closeModal();
-                }}
-              />
-            )}
-            <div className="modal-actions">
-              <button onClick={closeModal}>取消</button>
-              {modal.type === "input" ? (
-                <button
-                  className="primary"
-                  onClick={() => {
-                    const input = document.querySelector(".modal-input") as HTMLInputElement;
-                    modal.onConfirm(input?.value);
-                  }}
-                >
-                  {modal.confirmText ?? "确定"}
-                </button>
-              ) : (
-                <button className={modal.danger ? "danger" : "primary"} onClick={() => modal.onConfirm()}>
-                  {modal.confirmText ?? "确定"}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        </ModalShell>
       )}
 
-      {/* 上传 Modal（选版本策略 → 选文件） */}
-      {uploadModal.open && (
-        <div className="modal-mask" onClick={closeUpload}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">上传文档</div>
-            <div className="modal-message">选择同名文件重复上传时, 版本策略决定新旧版本的共存方式:</div>
-            <div className="policy-radio">
-              <label className={`policy-opt ${uploadModal.policy === "replace" ? "checked" : ""}`}
-                     onClick={() => setUploadModal((u) => ({ ...u, policy: "replace" }))}>
-                <input type="radio" checked={uploadModal.policy === "replace"} readOnly />
-                <div className="policy-main">
-                  <strong>覆盖式</strong>
-                  <span>新版生效, 旧版本标记归档, 后续清理 (推荐)</span>
-                </div>
-              </label>
-              <label className={`policy-opt ${uploadModal.policy === "coexist" ? "checked" : ""}`}
-                     onClick={() => setUploadModal((u) => ({ ...u, policy: "coexist" }))}>
-                <input type="radio" checked={uploadModal.policy === "coexist"} readOnly />
-                <div className="policy-main">
-                  <strong>并存式</strong>
-                  <span>所有版本均可被检索到, 适合法规/合同类时效文献</span>
-                </div>
-              </label>
-            </div>
-            <div className="modal-actions">
-              <button onClick={closeUpload}>取消</button>
-              <button className="primary" onClick={handleUploadConfirm}>选择文件…</button>
-            </div>
-            {/* 文件选择器随 Modal 一起挂载/卸载，取消后不会再弹出系统文件框 */}
-            <input
-              ref={uploadInputRef}
-              type="file"
-              hidden
-              onChange={handleUploadFile}
-              accept=".pdf,.docx,.md,.txt,.json,.csv,.html"
-            />
-          </div>
-        </div>
-      )}
-
-      {/* 访问令牌弹窗（401 时强制出现，验证通过才放行） */}
-      {authOpen && (
-        <div className="modal-mask">
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">输入访问令牌</div>
-            <div className="modal-message">系统已开启访问鉴权，请输入 API Token 后继续使用。</div>
-            <input
-              ref={tokenInputRef}
-              className="modal-input"
-              type="password"
-              autoFocus
-              placeholder="API Token"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitToken((e.target as HTMLInputElement).value);
-              }}
-            />
-            <div className="modal-actions">
-              <button className="primary" onClick={() => submitToken(tokenInputRef.current?.value ?? "")}>确定</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Toast text={toast} />
     </div>
   );
 };

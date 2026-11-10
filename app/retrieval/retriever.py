@@ -32,15 +32,30 @@ class ScoredChunk:
     metadata: dict = field(default_factory=dict)
 
 
-async def hybrid_search(query: str, kb_id: str, top_k: int | None = None) -> list[ScoredChunk]:
-    """三路召回 → question/dense 同 chunk 取 max → 融合 → searchable 过滤 → rerank。"""
+async def hybrid_search(query: str, kb_ids: str | list[str], top_k: int | None = None) -> list[ScoredChunk]:
+    """三路召回 → question/dense 同 chunk 取 max → 融合 → searchable 过滤 → rerank。
+
+    kb_ids 可传单库 id 或多库列表：多库时每个库各自召回（Milvus 按库分 database），
+    合并候选后统一做一次 rerank，保证跨库分数可比。
+    """
     cfg = settings.retrieve
     k = top_k or cfg.per_channel_top_k
+    ids = [kb_ids] if isinstance(kb_ids, str) else list(kb_ids)
+    if not ids:
+        return []
 
     dense_vec, sparse_vec = await embed_query(query)
-    dense_hits = milvus_client.search_dense(kb_id, dense_vec, k)
-    question_hits = milvus_client.search_question(kb_id, dense_vec, k)
-    sparse_hits = milvus_client.search_sparse(kb_id, sparse_vec, k)
+    dense_hits: list[dict] = []
+    question_hits: list[dict] = []
+    sparse_hits: list[dict] = []
+    for kid in ids:
+        try:
+            dense_hits += milvus_client.search_dense(kid, dense_vec, k)
+            question_hits += milvus_client.search_question(kid, dense_vec, k)
+            sparse_hits += milvus_client.search_sparse(kid, sparse_vec, k)
+        except Exception:
+            # 跨库检索时单库不可用（未建 collection / 连接异常）不应拖垮整个问答
+            logger.exception("单库检索失败，跳过 kb_id=%s", kid)
 
     # question 召回与 dense 召回对同一 chunk 取分数最大值，视为同一路 cosine（§3.1）
     cosine_map: dict[str, float] = {}
@@ -82,7 +97,7 @@ async def hybrid_search(query: str, kb_id: str, top_k: int | None = None) -> lis
 
     # 版本过滤：回 PG 过滤 searchable=true（§5.3 检索一致性）
     candidates = sorted(scored.values(), key=lambda x: -x.score)[: cfg.rerank.candidate_pool_max]
-    candidates = await _filter_searchable(candidates, kb_id)
+    candidates = await _filter_searchable(candidates, ids)
 
     # rerank 硬过滤 + TopN
     if not candidates:
@@ -116,7 +131,7 @@ async def hybrid_search(query: str, kb_id: str, top_k: int | None = None) -> lis
     return result
 
 
-async def _filter_searchable(candidates: list[ScoredChunk], kb_id: str) -> list[ScoredChunk]:
+async def _filter_searchable(candidates: list[ScoredChunk], kb_ids: list[str]) -> list[ScoredChunk]:
     """Milvus 宽召回后、入 rerank 池前，按 chunk 的 version 回 PG 过滤 searchable=true。"""
     from app.db.session import AsyncSessionLocal
     from app.models.entities import Chunk, Document
@@ -128,7 +143,7 @@ async def _filter_searchable(candidates: list[ScoredChunk], kb_id: str) -> list[
             .where(Chunk.id.in_(ids), Chunk.searchable.is_(True))
         )).all()
         docs = (await session.execute(
-            select(Document.id, Document.title).where(Document.kb_id == kb_id)
+            select(Document.id, Document.title).where(Document.kb_id.in_(kb_ids))
         )).all()
     title_map = {d.id: d.title for d in docs}
     valid = {r.id: r for r in rows}

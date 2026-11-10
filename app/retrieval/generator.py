@@ -65,6 +65,8 @@ def extract_citations(answer: str, used: list[ScoredChunk]) -> list[dict]:
             "doc_title": c.doc_title,
             "page": c.page,
             "rerank_score": c.rerank_score,
+            # 摘要片段：前端引用卡片展示，避免再发一次请求取原文
+            "snippet": (c.content or "")[:140].replace("\n", " ").strip(),
         }
         for i, c in enumerate(deduped)
     ]
